@@ -3,6 +3,7 @@ import { waveformPeaks } from './audio';
 
 const STORE = 'projects';
 const PROJECT_KEY = 'current';
+const SUMMARY_KEY = 'current-summary';
 const mediaExtensions: Record<string, MediaKind> = { mp4: 'video', mov: 'video', webm: 'video', mkv: 'video', m4v: 'video', ogv: 'video', mp3: 'audio', wav: 'audio', m4a: 'audio', aac: 'audio', ogg: 'audio', flac: 'audio', opus: 'audio', png: 'image', jpg: 'image', jpeg: 'image', webp: 'image', avif: 'image', gif: 'image' };
 
 /** Media are decoded locally. No upload, fetch, or remote conversion takes place. */
@@ -29,15 +30,31 @@ export async function importMedia(file: File): Promise<MediaAsset> {
         asset.duration = media.duration;
         if (media instanceof HTMLVideoElement) {
           asset.width = media.videoWidth; asset.height = media.videoHeight;
-          await new Promise<void>(resolve => {
-            const timer = setTimeout(resolve, 2000);
-            const done = () => { clearTimeout(timer); resolve(); };
-            media.addEventListener('loadeddata', done, { once: true });
-            media.addEventListener('seeked', done, { once: true });
-            media.currentTime = Math.min(.1, media.duration / 2);
-            if (media.readyState >= 2) done();
+          const targetTime = Math.min(.1, media.duration / 2);
+          const frameReady = await new Promise<boolean>(resolve => {
+            let seekComplete = Math.abs(media.currentTime - targetTime) < .0001;
+            const cleanup = () => {
+              clearTimeout(timer);
+              media.removeEventListener('seeked', seeked);
+              media.removeEventListener('loadeddata', ready);
+              media.removeEventListener('canplay', ready);
+              media.removeEventListener('error', failed);
+            };
+            const finish = (ready: boolean) => { cleanup(); resolve(ready); };
+            const ready = () => {
+              if (seekComplete && !media.seeking && media.readyState >= 2 && Math.abs(media.currentTime - targetTime) < .05) finish(true);
+            };
+            const seeked = () => { seekComplete = true; ready(); };
+            const failed = () => finish(false);
+            const timer = setTimeout(() => finish(false), 5000);
+            media.addEventListener('seeked', seeked);
+            media.addEventListener('loadeddata', ready);
+            media.addEventListener('canplay', ready);
+            media.addEventListener('error', failed);
+            try { media.currentTime = targetTime; ready(); }
+            catch { finish(false); }
           });
-          if (media.readyState >= 2) asset.thumbnail = makeThumbnail(media, media.videoWidth, media.videoHeight);
+          if (frameReady) asset.thumbnail = makeThumbnail(media, media.videoWidth, media.videoHeight);
         }
       } finally { media.removeAttribute('src'); media.load(); }
       let context: AudioContext | undefined;
@@ -70,9 +87,41 @@ function makeThumbnail(source: CanvasImageSource, width: number, height: number)
 }
 
 interface AssetRecord { id: string; name: string; kind: MediaKind; duration: number; width?: number; height?: number; file?: File; demo?: boolean; url?: string; thumbnail?: string; waveform?: number[]; }
-interface SavedProject { version: 1; project: Project; assets: AssetRecord[]; }
+interface SavedProject { version: 1; project: Project; assets: AssetRecord[]; updatedAt?: number; }
+export interface SavedProjectSummary { name: string; clipCount: number; assetCount: number; duration: number; updatedAt?: number; isDemo: boolean; }
+function summarizeSavedProject(saved: SavedProject): SavedProjectSummary {
+  if (saved.version !== 1 || !saved.project || !Array.isArray(saved.project.clips) || !Array.isArray(saved.project.subtitles) || !Array.isArray(saved.assets)) throw new Error('Некоректний збережений проєкт.');
+  const visualAssets = saved.assets.filter(asset => asset.kind !== 'audio');
+  const bundledAmbient = (asset: AssetRecord) => asset.kind === 'audio' && asset.id === 'ambient' && asset.name === 'Тиха висота · ambient.wav';
+  const onlySampleAssets = visualAssets.length > 0 && visualAssets.every(asset => asset.demo === true) && saved.assets.every(asset => asset.demo === true || bundledAmbient(asset));
+  const sampleIds = new Set(saved.assets.filter(asset => asset.demo === true || bundledAmbient(asset)).map(asset => asset.id));
+  const isDemo = onlySampleAssets && saved.project.clips.length > 0 && saved.project.clips.every(clip => sampleIds.has(clip.assetId));
+  const ends = [...saved.project.clips.map(clip => clip.start + clip.duration), ...saved.project.subtitles.map(cue => cue.end)];
+  const duration = Math.max(0, ...ends.filter(end => typeof end === 'number' && Number.isFinite(end)));
+  return { name: typeof saved.project.name === 'string' ? saved.project.name : 'Проєкт', clipCount: saved.project.clips.length, assetCount: saved.assets.length, duration, ...(Number.isFinite(saved.updatedAt) ? { updatedAt: saved.updatedAt } : {}), isDemo };
+}
+function readStoreValue<T>(database: IDBDatabase, key: string): Promise<T | undefined> {
+  return new Promise((resolve, reject) => {
+    const request = database.transaction(STORE, 'readonly').objectStore(STORE).get(key);
+    request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+  });
+}
+/** Reads the saved document summary without creating object URLs or decoding source files. */
+export async function peekSavedProject(): Promise<SavedProjectSummary | null> {
+  const database = await openDatabase();
+  try {
+    const summary = await readStoreValue<SavedProjectSummary>(database, SUMMARY_KEY);
+    if (summary && typeof summary.name === 'string' && Number.isFinite(summary.clipCount) && Number.isFinite(summary.assetCount) && Number.isFinite(summary.duration) && typeof summary.isDemo === 'boolean') return summary;
+    const saved = await readStoreValue<SavedProject>(database, PROJECT_KEY);
+    return saved ? summarizeSavedProject(saved) : null;
+  } finally { database.close(); }
+}
+function bundledDemoUrl(value: unknown): string {
+  return typeof value === 'string' && /^(?:\.\/|\/)?demo-[a-z0-9_-]+\.(jpg|jpeg|png|svg|webp)$/i.test(value) ? value : '';
+}
 function assetRecord(asset: MediaAsset, includeFile: boolean): AssetRecord {
-  return { id: asset.id, name: asset.name, kind: asset.kind, duration: asset.duration, width: asset.width, height: asset.height, ...(includeFile && asset.file ? { file: asset.file } : {}), ...(asset.demo ? { demo: true, url: asset.url, thumbnail: asset.thumbnail, waveform: asset.waveform } : {}) };
+  const demoUrl = asset.demo ? bundledDemoUrl(asset.url) : '';
+  return { id: asset.id, name: asset.name, kind: asset.kind, duration: asset.duration, width: asset.width, height: asset.height, ...(includeFile && asset.file ? { file: asset.file } : {}), ...(includeFile && asset.demo ? { demo: true, url: asset.url, thumbnail: asset.thumbnail, waveform: asset.waveform } : {}), ...(!includeFile && demoUrl ? { demo: true, url: demoUrl, thumbnail: demoUrl } : {}) };
 }
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -89,7 +138,9 @@ export async function saveProject(project: Project, assets: MediaAsset[]): Promi
     await new Promise<void>((resolve, reject) => {
       const transaction = database.transaction(STORE, 'readwrite');
       transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(transaction.error || new Error('Недостатньо місця для локального збереження.')); transaction.onabort = () => reject(transaction.error || new Error('Збереження перервано.'));
-      transaction.objectStore(STORE).put({ version: 1, project, assets: assets.map(asset => assetRecord(asset, true)) } satisfies SavedProject, PROJECT_KEY);
+      const saved: SavedProject = { version: 1, project, assets: assets.map(asset => assetRecord(asset, true)), updatedAt: Date.now() };
+      transaction.objectStore(STORE).put(saved, PROJECT_KEY);
+      transaction.objectStore(STORE).put(summarizeSavedProject(saved), SUMMARY_KEY);
     });
   } finally { database.close(); }
 }
@@ -126,11 +177,23 @@ export async function clearSavedProject(): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       const transaction = database.transaction(STORE, 'readwrite'); transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(transaction.error); transaction.onabort = () => reject(transaction.error);
       transaction.objectStore(STORE).delete(PROJECT_KEY);
+      transaction.objectStore(STORE).delete(SUMMARY_KEY);
     });
   } finally { database.close(); }
 }
 export function downloadBlob(blob: Blob, name: string): void {
   const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = name; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+/** Exports saved edit decisions without restoring or decoding any source media. */
+export async function exportSavedProject(): Promise<void> {
+  const database = await openDatabase();
+  let saved: SavedProject | undefined;
+  try { saved = await readStoreValue<SavedProject>(database, PROJECT_KEY); }
+  finally { database.close(); }
+  if (!saved) throw new Error('У цьому браузері немає збереженого проєкту.');
+  if (saved.version !== 1 || !Array.isArray(saved.assets)) throw new Error('Ця версія збереженого проєкту не підтримується.');
+  const project = validateProject(saved.project, saved.assets);
+  downloadProject(project, saved.assets.map(asset => ({ ...asset, url: asset.url ?? '' })));
 }
 export function downloadProject(project: Project, assets: MediaAsset[]): void {
   const json = JSON.stringify({ format: 'cutsync', version: 1, project, assets: assets.map(asset => assetRecord(asset, false)) }, null, 2);
@@ -209,7 +272,7 @@ export async function parseProjectFile(file: File, existingAssets: MediaAsset[])
     const match = existingAssets.find(asset => asset.name === name && asset.kind === kind && Math.abs(asset.duration - duration) < .1 && asset.url);
     if (match) return { ...match, id };
     // Project JSON may only reference bundled demonstration assets. Arbitrary remote URLs are never fetched.
-    const demoUrl = a.demo === true && typeof a.url === 'string' && /^(?:\.\/|\/)?demo-[a-z0-9_-]+\.(jpg|jpeg|png|svg|webp)$/i.test(a.url) ? a.url : '';
+    const demoUrl = a.demo === true ? bundledDemoUrl(a.url) : '';
     if (!demoUrl) missing.push(name);
     return { id, name, kind, duration, url: demoUrl, ...(demoUrl ? { demo: true, thumbnail: demoUrl } : {}), ...(typeof a.width === 'number' ? { width: number(a.width, 'ширина медіа', 1, 50000) } : {}), ...(typeof a.height === 'number' ? { height: number(a.height, 'висота медіа', 1, 50000) } : {}) };
   });

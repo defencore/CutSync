@@ -1,9 +1,32 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { appEnglish, translateDynamic } from './i18n-app';
 import { timelineEnglish } from './i18n-timeline';
+import { workflowEnglish } from './i18n-workflow';
 
 export type Language = 'uk' | 'en';
 const inspectorEnglish: Record<string, string> = {
+  "Розташування й обрізання": "Placement and trimming",
+  "Початок звуку, с": "Audio start, s",
+  "Початок на шкалі, с": "Timeline start, s",
+  "− раніше · + пізніше від 00:00. Звук до 00:00 обрізається.": "− earlier · + later from 00:00. Audio before 00:00 is trimmed.",
+  "Вибраний субтитр": "Selected subtitle",
+  "Вибраний кліп": "Selected clip",
+  "Скинути налаштування": "Reset settings",
+  "Скинути трансформацію": "Reset transform",
+  "Скинути появу та зникнення": "Reset fades",
+  "Скинути виділення": "Reset spotlight",
+  "Скинути розмиття": "Reset blur",
+  "Скинути гучність": "Reset volume",
+  "Скинути очищення": "Reset audio cleanup",
+  "Скинути еквалайзер": "Reset equalizer",
+  "Enter — застосувати · Esc — скасувати": "Enter to apply · Esc to cancel",
+  "Ctrl/⌘ Enter — застосувати · Esc — скасувати": "Ctrl/⌘ Enter to apply · Esc to cancel",
+  "Оберіть кліп на шкалі": "Select a timeline clip",
+  "Почніть із матеріалів": "Start with your media",
+  "Його розташування, колір і звук з’являться тут.": "Its placement, color, and audio controls will appear here.",
+  "Імпортуйте відео, звук або фото та додайте їх на монтажну шкалу.": "Import video, audio, or images and add them to the timeline.",
+  "Імпортувати матеріали": "Import media",
+  "Додати субтитр": "Add subtitle",
   'Інспектор кліпу': 'Clip inspector',
   'Інспектор': 'Inspector',
   'ТЕКСТ': 'TEXT',
@@ -104,7 +127,7 @@ const inspectorEnglish: Record<string, string> = {
   'Обробка на вашому пристрої': 'Processed on your device',
 };
 
-export const englishTranslations: Record<string, string> = { ...appEnglish, ...timelineEnglish, ...inspectorEnglish };
+export const englishTranslations: Record<string, string> = { ...appEnglish, ...timelineEnglish, ...inspectorEnglish,...workflowEnglish };
 type I18nValue = { language: Language; setLanguage: (language: Language) => void; t: (text: string) => string };
 const I18nContext = createContext<I18nValue>({ language: 'uk', setLanguage: () => {}, t: text => text });
 
