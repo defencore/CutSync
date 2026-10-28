@@ -1,5 +1,5 @@
 import { waveformPeaks } from './engine/audio';
-import { defaultAudio, defaultVideo, type MediaAsset, type Project } from './types';
+import { defaultAudio, defaultVideo, defaultTracks, type MediaAsset, type Project } from './types';
 export function createDemo(): {project: Project; assets: MediaAsset[]} {
   const base = import.meta.env?.BASE_URL || './';
   const assets: MediaAsset[] = [
@@ -15,7 +15,7 @@ export function createDemo(): {project: Project; assets: MediaAsset[]} {
   word(0,'RIFF'); view.setUint32(4,wav.byteLength-8,true); word(8,'WAVE'); word(12,'fmt '); view.setUint32(16,16,true); view.setUint16(20,1,true); view.setUint16(22,1,true); view.setUint32(24,sr,true); view.setUint32(28,sr*2,true); view.setUint16(32,2,true); view.setUint16(34,16,true); word(36,'data'); view.setUint32(40,samples.length*2,true); samples.forEach((s,i)=>view.setInt16(44+i*2,s*32767,true));
   const file = new File([wav], 'Тиха висота · ambient.wav', {type:'audio/wav'});
   assets.push({id:'ambient',name:file.name,kind:'audio',url:URL.createObjectURL(file),duration,audioBuffer:buffer,file,waveform:waveformPeaks(buffer,160)});
-  const project: Project = { name: 'На висоті тиші', width:1920,height:1080,fps:25,mutedTracks:[],hiddenTracks:[],subtitleStyle:{size:48,color:'#ffffff',background:true},subtitles:[{id:'sub1',start:2,end:9,text:'Там, де починається тиша.'},{id:'sub2',start:14,end:20,text:'І кожен момент має значення.'},{id:'sub3',start:27,end:33,text:'Збережи свою історію.'}],clips:[
+  const project: Project = { name: 'На висоті тиші', tracks:defaultTracks(), width:1920,height:1080,fps:25,mutedTracks:[],hiddenTracks:[],subtitleStyle:{size:48,color:'#ffffff',background:true},subtitles:[{id:'sub1',start:2,end:9,text:'Там, де починається тиша.'},{id:'sub2',start:14,end:20,text:'І кожен момент має значення.'},{id:'sub3',start:27,end:33,text:'Збережи свою історію.'}],clips:[
     ...['mountain','forest','lake'].map((assetId,i)=>({id:`demo-${i}`,assetId,trackId:'v1',name:assets[i].name,start:i*12,in:0,duration:12,muted:false,audio:defaultAudio(),video:{...defaultVideo(),fadeIn:i===0?1:0,fadeOut:i===2?1:0}})),
     {id:'ambient-clip',assetId:'ambient',trackId:'a1',name:'Тиха висота · ambient.wav',start:0,in:0,duration:36,muted:false,audio:{...defaultAudio(),gain:-3},video:defaultVideo()}
   ] };

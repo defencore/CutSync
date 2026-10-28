@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseSubtitles, subtitlesToSrt, validateProject, parseProjectFile, loadProject } from '../src/engine/project';
-import { defaultAudio, defaultVideo, type Project } from '../src/types';
+import { defaultAudio, defaultVideo, defaultTracks, type Project } from '../src/types';
 
-const project = (): Project => ({ name: 'Карпати', width: 1920, height: 1080, fps: 25, clips: [{ id: 'c1', assetId: 'a1', trackId: 'v1', name: 'Камера', start: 2, in: 1, duration: 10, muted: false, audio: defaultAudio(), video: defaultVideo() }], subtitles: [], subtitleStyle: { size: 36, color: '#ffffff', background: true }, mutedTracks: [], hiddenTracks: [] });
+const project = (): Project => ({ name: 'Карпати', tracks: defaultTracks(), width: 1920, height: 1080, fps: 25, clips: [{ id: 'c1', assetId: 'a1', trackId: 'v1', name: 'Камера', start: 2, in: 1, duration: 10, muted: false, audio: defaultAudio(), video: defaultVideo() }], subtitles: [], subtitleStyle: { size: 36, color: '#ffffff', background: true }, mutedTracks: [], hiddenTracks: [] });
 
 describe('SRT/VTT import and export', () => {
   it('accepts BOM, CRLF, multiline subtitles and strips caption markup', () => {
@@ -76,5 +76,37 @@ describe('saved media recovery', () => {
     expect(recovered?.project).toEqual(project());
     expect(recovered?.assets[0]).toMatchObject({ id: 'a1', name: file.name, file, url: '' });
     expect(database.close).toHaveBeenCalledOnce();
+  });
+});
+
+
+describe('editable tracks and signed audio offsets', () => {
+  it('migrates old saved version 1 projects without replacing edit decisions', () => {
+    const legacy = { ...project(), tracks: undefined };
+    const upgraded = validateProject(legacy, [{ id: 'a1', kind: 'video' }]);
+    expect(upgraded.tracks).toEqual(defaultTracks());
+    expect(upgraded.clips).toEqual(legacy.clips);
+  });
+  it('preserves custom tracks and accepts positive or negative audio offsets', () => {
+    const p = project(); p.tracks = [{ id: 'a3', name: 'Рекордер сцени', kind: 'audio' }]; p.clips[0].trackId = 'a3'; p.clips[0].start = -2.75;
+    const loaded = validateProject(p, [{ id: 'a1', kind: 'audio' }]);
+    expect(loaded).toEqual(p);
+    p.clips[0].start = 2.75; expect(validateProject(p, [{ id: 'a1', kind: 'audio' }])).toEqual(p);
+  });
+  it('allows detached video audio but rejects negative video and incompatible tracks', () => {
+    const p = project(); p.clips[0].trackId = 'a1'; p.clips[0].start = -1;
+    expect(validateProject(p, [{ id: 'a1', kind: 'video' }]).clips[0].start).toBe(-1);
+    expect(() => validateProject(p, [{ id: 'a1', kind: 'image' }])).toThrow();
+    p.clips[0].trackId = 'v1';
+    expect(() => validateProject(p, [{ id: 'a1', kind: 'video' }])).toThrow();
+    p.clips[0].start = 0;
+    expect(() => validateProject(p, [{ id: 'a1', kind: 'audio' }])).toThrow();
+  });
+  it('rejects duplicate track IDs, blank names, missing tracks and out-of-range IDs', () => {
+    const p = project(); p.tracks.push({ ...p.tracks[0] });
+    expect(() => validateProject(p, [{ id: 'a1' }])).toThrow();
+    expect(() => validateProject({ ...project(), tracks: [{ id: 'v1', name: ' ', kind: 'video' }] }, [{ id: 'a1' }])).toThrow();
+    expect(() => validateProject({ ...project(), tracks: [] }, [{ id: 'a1' }])).toThrow();
+    expect(() => validateProject({ ...project(), tracks: [{ id: 'v33', name: 'Відео', kind: 'video' }] }, [{ id: 'a1' }])).toThrow();
   });
 });

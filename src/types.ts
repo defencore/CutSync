@@ -20,8 +20,9 @@ export interface Clip {
   duration: number; muted: boolean; audio: AudioEffects; video: VideoEffects;
 }
 export interface Subtitle { id: string; start: number; end: number; text: string; }
+export interface Track { id: string; name: string; kind: 'video' | 'audio'; }
 export interface Project {
-  name: string; width: number; height: number; fps: number; clips: Clip[];
+  name: string; width: number; height: number; fps: number; tracks: Track[]; clips: Clip[];
   subtitles: Subtitle[]; subtitleStyle: { size: number; color: string; background: boolean };
   mutedTracks: string[]; hiddenTracks: string[];
 }
@@ -31,10 +32,14 @@ export const TRACKS = [
   { id: 'a1', name: 'Звук 1', kind: 'audio' },
   { id: 'a2', name: 'Звук 2', kind: 'audio' },
 ] as const;
+export const defaultTracks = (): Track[] => TRACKS.map(track => ({ ...track }));
 export const defaultAudio = (): AudioEffects => ({ gain: 0, normalize: false, highpass: 20, lowpass: 20000, bass: 0, treble: 0, compressor: false, noiseReduction: 0 });
 export const defaultVideo = (): VideoEffects => ({ brightness: 1, contrast: 1, saturation: 1, temperature: 0, blur: 0, zoom: 1, rotation: 0, cropX: 0, cropY: 0, fadeIn: 0, fadeOut: 0, highlight: { enabled: false, x: .35, y: .25, width: .3, height: .5 } });
 export const projectDuration = (project: Project): number => Math.max(0, ...project.clips.map(c => c.start + c.duration), ...project.subtitles.map(s => s.end));
 export const uid = (): string => crypto.randomUUID();
 export const timecode = (seconds: number, fps = 25): string => {
- const n = Math.max(0, seconds); return [Math.floor(n / 3600), Math.floor(n / 60) % 60, Math.floor(n) % 60, Math.floor((n % 1) * fps)].map(x => String(x).padStart(2, '0')).join(':');
+ const totalFrames = Math.floor(Math.max(0, seconds) * fps + 1e-7);
+ const wholeSeconds = Math.floor(totalFrames / fps);
+ const frames = Math.round(totalFrames - wholeSeconds * fps);
+ return [Math.floor(wholeSeconds / 3600), Math.floor(wholeSeconds / 60) % 60, wholeSeconds % 60, frames].map(x => String(x).padStart(2, '0')).join(':');
 };

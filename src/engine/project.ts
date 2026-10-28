@@ -1,4 +1,4 @@
-import { type AudioEffects, type MediaAsset, type MediaKind, type Project, type Subtitle, type VideoEffects, TRACKS, defaultAudio, defaultVideo, uid } from '../types';
+import { type AudioEffects, type MediaAsset, type MediaKind, type Project, type Subtitle, type VideoEffects, type Track, defaultTracks, defaultAudio, defaultVideo, uid } from '../types';
 import { waveformPeaks } from './audio';
 
 const STORE = 'projects';
@@ -163,14 +163,24 @@ function validateVideo(value: unknown): VideoEffects {
   const h = v.highlight === undefined ? d.highlight : object(v.highlight, 'виділення');
   return { brightness: n('brightness', 0, 4), contrast: n('contrast', 0, 4), saturation: n('saturation', 0, 4), temperature: n('temperature', -100, 100), blur: n('blur', 0, 100), zoom: n('zoom', .1, 10), rotation: n('rotation', -360, 360), cropX: n('cropX', -100, 100), cropY: n('cropY', -100, 100), fadeIn: n('fadeIn', 0, 3600), fadeOut: n('fadeOut', 0, 3600), highlight: { enabled: boolean(h.enabled, false), x: number(h.x, 'highlight.x', 0, 1), y: number(h.y, 'highlight.y', 0, 1), width: number(h.width, 'highlight.width', .01, 1), height: number(h.height, 'highlight.height', .01, 1) } };
 }
-export function validateProject(value: unknown, assets: Pick<MediaAsset, 'id'>[]): Project {
+export function validateProject(value: unknown, assets: (Pick<MediaAsset, 'id'> & Partial<Pick<MediaAsset, 'kind'>>)[]): Project {
   const v = object(value, 'дані проєкту');
   if (!Array.isArray(v.clips) || v.clips.length > 10000 || !Array.isArray(v.subtitles) || v.subtitles.length > 100000) throw new Error('Некоректний список кліпів або субтитрів.');
-  const assetIds = new Set(assets.map(asset => asset.id)); const clipIds = new Set<string>();
+  // Version 1 projects without tracks are upgraded in memory, preserving every existing edit.
+  const rawTracks = v.tracks === undefined ? defaultTracks() : v.tracks;
+  if (!Array.isArray(rawTracks) || rawTracks.length > 64) throw new Error('Некоректний список доріжок.');
+  const trackIds = new Set<string>();
+  const tracks: Track[] = rawTracks.map(raw => {
+    const track = object(raw, 'доріжка'); const id = string(track.id, 'ідентифікатор доріжки', 10); const name = string(track.name, 'назва доріжки', 100).trim();
+    if (!/^[va](?:[1-9]|[12][0-9]|3[0-2])$/.test(id) || trackIds.has(id) || !name || (track.kind !== 'video' && track.kind !== 'audio') || (id.startsWith('v') ? 'video' : 'audio') !== track.kind) throw new Error('Некоректна або повторна доріжка.');
+    trackIds.add(id); return { id, name, kind: track.kind };
+  });
+  const assetMap = new Map(assets.map(asset => [asset.id, asset])); const clipIds = new Set<string>();
   const clips = v.clips.map(raw => {
     const clip = object(raw, 'кліп'); const id = string(clip.id, 'ідентифікатор кліпу', 200); const assetId = string(clip.assetId, 'медіафайл кліпу', 200); const trackId = string(clip.trackId, 'доріжка', 50);
-    if (clipIds.has(id) || !assetIds.has(assetId) || !TRACKS.some(track => track.id === trackId)) throw new Error('Проєкт містить повторний кліп або невідомий файл / доріжку.'); clipIds.add(id);
-    return { id, assetId, trackId, name: string(clip.name, 'назва кліпу', 1000), start: number(clip.start, 'початок кліпу', 0, 604800), in: number(clip.in, 'вхідна точка кліпу', 0, 604800), duration: number(clip.duration, 'тривалість кліпу', .001, 604800), muted: boolean(clip.muted, false), audio: validateAudio(clip.audio), video: validateVideo(clip.video) };
+    const track = tracks.find(track => track.id === trackId), asset = assetMap.get(assetId);
+    if (clipIds.has(id) || !asset || !track || (asset.kind === 'audio' && track.kind !== 'audio') || (asset.kind === 'image' && track.kind !== 'video')) throw new Error('Проєкт містить повторний кліп, невідомий файл або несумісну доріжку.'); clipIds.add(id);
+    return { id, assetId, trackId, name: string(clip.name, 'назва кліпу', 1000), start: number(clip.start, 'початок кліпу', track.kind === 'audio' ? -86400 : 0, 86400), in: number(clip.in, 'вхідна точка кліпу', 0, 604800), duration: number(clip.duration, 'тривалість кліпу', .001, 604800), muted: boolean(clip.muted, false), audio: validateAudio(clip.audio), video: validateVideo(clip.video) };
   });
   const subtitles = v.subtitles.map(raw => {
     const cue = object(raw, 'субтитр'); const start = number(cue.start, 'початок субтитру', 0, 604800); const end = number(cue.end, 'кінець субтитру', 0, 604800);
@@ -182,10 +192,10 @@ export function validateProject(value: unknown, assets: Pick<MediaAsset, 'id'>[]
   });
   const style = object(v.subtitleStyle, 'стиль субтитрів');
   const color = string(style.color, 'колір субтитрів', 50); if (!/^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(color)) throw new Error('Некоректний колір субтитрів.');
-  const tracks = (value: unknown): string[] => {
-    if (!Array.isArray(value) || value.some(id => typeof id !== 'string' || !TRACKS.some(track => track.id === id))) throw new Error('Некоректні налаштування доріжок.'); return [...new Set(value as string[])];
+  const trackFlags = (value: unknown): string[] => {
+    if (!Array.isArray(value) || value.some(id => typeof id !== 'string' || !trackIds.has(id))) throw new Error('Некоректні налаштування доріжок.'); return [...new Set(value as string[])];
   };
-  return { name: string(v.name, 'назва проєкту', 1000), width: number(v.width, 'ширина кадру', 16, 7680), height: number(v.height, 'висота кадру', 16, 7680), fps: number(v.fps, 'частота кадрів', 1, 120), clips, subtitles, subtitleStyle: { size: number(style.size, 'розмір субтитрів', 8, 200), color, background: boolean(style.background, true) }, mutedTracks: tracks(v.mutedTracks), hiddenTracks: tracks(v.hiddenTracks) };
+  return { name: string(v.name, 'назва проєкту', 1000), width: number(v.width, 'ширина кадру', 16, 7680), height: number(v.height, 'висота кадру', 16, 7680), fps: number(v.fps, 'частота кадрів', 1, 120), tracks, clips, subtitles, subtitleStyle: { size: number(style.size, 'розмір субтитрів', 8, 200), color, background: boolean(style.background, true) }, mutedTracks: trackFlags(v.mutedTracks), hiddenTracks: trackFlags(v.hiddenTracks) };
 }
 export async function parseProjectFile(file: File, existingAssets: MediaAsset[]): Promise<{project: Project; assets: MediaAsset[]; missing: string[]}> {
   if (file.size > 25 * 1024 * 1024) throw new Error('Файл проєкту завеликий. Максимум — 25 МБ.');

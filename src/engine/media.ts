@@ -8,8 +8,8 @@ export interface ExportOptions { width: number; height: number; fps: number; mim
 export function getExportFormats(): ExportFormat[] {
   if (typeof MediaRecorder === 'undefined') return [];
   const candidates: ExportFormat[] = [
-    { label: 'MP4', mimeType: 'video/mp4', extension: 'mp4' },
-    { label: 'MP4 · H.264', mimeType: 'video/mp4;codecs=avc1.420028,mp4a.40.2', extension: 'mp4' },
+    { label: 'MP4 · H.264 / AAC', mimeType: 'video/mp4;codecs=avc1.420028,mp4a.40.2', extension: 'mp4' },
+    { label: 'MP4 · кодек браузера', mimeType: 'video/mp4', extension: 'mp4' },
     { label: 'WebM · VP9', mimeType: 'video/webm;codecs=vp9,opus', extension: 'webm' },
     { label: 'WebM · VP8', mimeType: 'video/webm;codecs=vp8,opus', extension: 'webm' },
     { label: 'WebM', mimeType: 'video/webm', extension: 'webm' },
@@ -25,14 +25,15 @@ export function getExportFormats(): ExportFormat[] {
 export const clipIsActive = (clip: Clip, time: number): boolean =>
   time >= clip.start && time < clip.start + clip.duration;
 
-/** Back-to-front: V2 composites over V1; later clips win overlaps on one track. */
+/** Project track order is top-to-bottom; later clips win overlaps on one track. */
 export function visibleClips(project: Project, assets: MediaAsset[], time: number): Clip[] {
   const map = new Map(assets.map(asset => [asset.id, asset]));
+  const ranks = new Map(project.tracks.filter(track => track.kind === 'video').map((track, index) => [track.id, index]));
   return project.clips.filter(clip => {
     const asset = map.get(clip.assetId);
-    return asset && asset.kind !== 'audio' && clip.trackId.startsWith('v') &&
+    return asset && asset.kind !== 'audio' && ranks.has(clip.trackId) &&
       !project.hiddenTracks.includes(clip.trackId) && clipIsActive(clip, time);
-  }).sort((a, b) => Number(a.trackId.slice(1)) - Number(b.trackId.slice(1)) || a.start - b.start);
+  }).sort((a, b) => ranks.get(b.trackId)! - ranks.get(a.trackId)! || a.start - b.start);
 }
 
 export function clipOpacity(clip: Clip, time: number): number {
@@ -125,10 +126,11 @@ class Compositor {
     }
   }
 
-  async prepare(project: Project, assets: MediaAsset[]): Promise<void> {
+  async prepare(project: Project, assets: MediaAsset[], prime = true): Promise<void> {
     this.reconcile(project, assets);
     const map = new Map(assets.map(asset => [asset.id, asset]));
-    await Promise.all(project.clips.filter(clip => clip.trackId.startsWith('v')).map(async clip => {
+    const videoTracks = new Set(project.tracks.filter(track => track.kind === 'video').map(track => track.id));
+    await Promise.all(project.clips.filter(clip => videoTracks.has(clip.trackId)).map(async clip => {
       const asset = map.get(clip.assetId);
       if (!asset || asset.kind === 'audio') return;
       if (asset.kind === 'image' || asset.demo) {
@@ -136,6 +138,7 @@ class Compositor {
       } else {
         const entry = this.ensureVideo(clip, asset);
         await entry.ready;
+        if (this.disposed || !prime || this.videos.get(clip.id) !== entry) return;
         const target = Math.max(0, Math.min(clip.in, entry.video.duration - .001));
         if (Math.abs(entry.video.currentTime - target) > .015) {
           entry.video.currentTime = target;
@@ -155,6 +158,7 @@ class Compositor {
       if (asset.kind === 'image' || asset.demo) { await this.ensureImage(asset).ready; return; }
       const entry = this.ensureVideo(clip, asset);
       await entry.ready;
+      if (this.disposed || revision !== this.seekRevision) return;
       const desired = Math.max(0, Math.min(clip.in + time - clip.start, entry.video.duration - .001));
       if (Math.abs(entry.video.currentTime - desired) > .01) {
         entry.video.currentTime = desired;
@@ -303,86 +307,208 @@ async function prepareAudio(project: Project, assets: MediaAsset[]): Promise<{ c
   ).map(async clip => ({ clip, buffer: await processedBuffer(map.get(clip.assetId)!, clip) })));
 }
 
+/** Source offsets remain positive when an audio recording begins before timeline zero. */
+export function audioClipWindow(clip: Clip, sourceDuration: number, from: number): { offset: number; duration: number; delay: number } | undefined {
+  const skip = Math.max(0, from - clip.start);
+  const offset = Math.max(0, clip.in + skip);
+  const duration = Math.min(clip.duration - skip, sourceDuration - offset);
+  if (duration <= 0 || clip.start + clip.duration <= from) return;
+  return { offset, duration, delay: Math.max(0, clip.start - from) };
+}
+
 function scheduleAudio(context: AudioContext, target: AudioNode, audio: { clip: Clip; buffer: AudioBuffer }[], from: number, origin: number): AudioBufferSourceNode[] {
   const sources: AudioBufferSourceNode[] = [];
   for (const { clip, buffer } of audio) {
-    const skip = Math.max(0, from - clip.start);
-    const offset = Math.max(0, clip.in + skip);
-    const duration = Math.min(clip.duration - skip, buffer.duration - offset);
-    if (duration <= 0 || clip.start + clip.duration <= from) continue;
+    const window = audioClipWindow(clip, buffer.duration, from);
+    if (!window) continue;
     const source = context.createBufferSource();
     source.buffer = buffer;
     source.connect(target);
-    source.start(origin + Math.max(0, clip.start - from), offset, duration);
+    source.start(origin + window.delay, window.offset, window.duration);
     sources.push(source);
   }
   return sources;
 }
 
+function audioConfiguration(project: Project, assets: MediaAsset[]): string {
+  const available = new Map(assets.filter(asset => asset.audioBuffer).map(asset => [asset.id, asset]));
+  return JSON.stringify({
+    clips: project.clips.filter(clip => available.has(clip.assetId)).map(clip => ({
+      id: clip.id, assetId: clip.assetId, trackId: clip.trackId, start: clip.start,
+      in: clip.in, duration: clip.duration, muted: clip.muted, effects: clip.audio,
+    })),
+    mutedTracks: project.mutedTracks,
+    sources: [...available.values()].map(asset => [asset.id, asset.url, asset.audioBuffer!.length, asset.audioBuffer!.sampleRate]),
+  });
+}
+
+interface PlaybackAudio { sources: AudioBufferSourceNode[]; gain: GainNode }
+
 export class TimelinePlayer {
   private compositor: Compositor;
   private audioContext?: AudioContext;
-  private sources: AudioBufferSourceNode[] = [];
+  private sessions = new Set<PlaybackAudio>();
+  private activeAudio?: PlaybackAudio;
   private frame = 0;
   private revision = 0;
+  private updateRevision = 0;
   private disposed = false;
   private playing = false;
+  private starting = false;
+  private position = 0;
+  private timelineFrom = 0;
+  private clockOrigin = 0;
+  private audioSignature = '';
 
   constructor(canvas: HTMLCanvasElement, private getProject: () => Project, private getAssets: () => MediaAsset[], private onTime: (time: number) => void) {
     this.compositor = new Compositor(canvas);
   }
 
+  get isPlaying(): boolean { return this.playing || this.starting; }
+
+  private currentPosition(at = this.audioContext?.currentTime ?? 0): number {
+    const time = this.playing ? this.timelineFrom + Math.max(0, at - this.clockOrigin) : this.position;
+    return Math.max(0, Math.min(projectDuration(this.getProject()), time));
+  }
+
+  private stopSession(session: PlaybackAudio, when?: number): void {
+    for (const source of session.sources) {
+      try { source.stop(when); } catch { /* Already stopped or ended. */ }
+    }
+    const release = () => {
+      for (const source of session.sources) source.disconnect();
+      session.gain.disconnect();
+      this.sessions.delete(session);
+    };
+    if (when !== undefined && this.audioContext && when > this.audioContext.currentTime) {
+      window.setTimeout(release, (when - this.audioContext.currentTime) * 1000 + 20);
+    } else release();
+  }
+
+  private installAudio(audio: { clip: Clip; buffer: AudioBuffer }[], from: number, when: number, crossfade: boolean): void {
+    const context = this.audioContext!;
+    const gain = context.createGain();
+    gain.connect(context.destination);
+    gain.gain.setValueAtTime(crossfade ? 0 : 1, when);
+    if (crossfade) gain.gain.linearRampToValueAtTime(1, when + .008);
+    const session = { gain, sources: scheduleAudio(context, gain, audio, from, when) };
+    this.sessions.add(session);
+    const prior = this.activeAudio;
+    this.activeAudio = session;
+    if (prior) {
+      prior.gain.gain.cancelScheduledValues(when);
+      prior.gain.gain.setValueAtTime(1, when);
+      prior.gain.gain.linearRampToValueAtTime(0, when + .008);
+      this.stopSession(prior, when + .008);
+    }
+  }
+
+  private tick = (): void => {
+    if (!this.playing || this.disposed) return;
+    const duration = projectDuration(this.getProject());
+    this.position = this.currentPosition();
+    this.compositor.render(this.getProject(), this.getAssets(), this.position, (this.audioContext?.currentTime ?? 0) >= this.clockOrigin);
+    this.onTime(this.position);
+    if (this.position >= duration) { this.pause(); return; }
+    this.frame = requestAnimationFrame(this.tick);
+  };
+
   async play(from: number): Promise<void> {
     if (this.disposed) return;
     this.pause();
     const revision = this.revision;
+    this.starting = true;
+    const duration = projectDuration(this.getProject());
+    this.position = Math.max(0, from >= duration ? 0 : Math.min(duration, from));
     try {
-    const context = this.audioContext ??= new AudioContext();
-    await context.resume();
-    const project = this.getProject(), assets = this.getAssets();
-    const duration = projectDuration(project);
-    if (!duration || from >= duration) from = 0;
-    const [, audio] = await Promise.all([this.compositor.prepare(project, assets), prepareAudio(project, assets)]);
-    if (this.disposed || revision !== this.revision) return;
-    await this.compositor.seek(project, assets, from);
-    if (this.disposed || revision !== this.revision) return;
-    const origin = context.currentTime + .05;
-    this.sources = scheduleAudio(context, context.destination, audio, from, origin);
-    this.playing = true;
-    const tick = () => {
-      if (!this.playing || this.disposed) return;
-      const elapsed = context.currentTime - origin;
-      const time = Math.min(duration, from + Math.max(0, elapsed));
-      this.compositor.render(this.getProject(), this.getAssets(), time, elapsed >= 0);
-      this.onTime(time);
-      if (time >= duration) { this.pause(); return; }
-      this.frame = requestAnimationFrame(tick);
-    };
-    tick();
+      const context = this.audioContext ??= new AudioContext();
+      await context.resume();
+      if (this.disposed || revision !== this.revision) return;
+      let audio: { clip: Clip; buffer: AudioBuffer }[] = [];
+      let signature = '';
+      // A setting can change while initial decoding is in flight. Start with its latest result.
+      do {
+        const project = this.getProject(), assets = this.getAssets();
+        signature = audioConfiguration(project, assets);
+        [, audio] = await Promise.all([this.compositor.prepare(project, assets), prepareAudio(project, assets)]);
+        if (this.disposed || revision !== this.revision) return;
+        await this.compositor.seek(this.getProject(), this.getAssets(), this.position);
+        if (this.disposed || revision !== this.revision) return;
+      } while (signature !== audioConfiguration(this.getProject(), this.getAssets()));
+      this.timelineFrom = this.position;
+      this.clockOrigin = context.currentTime + .05;
+      this.audioSignature = signature;
+      this.installAudio(audio, this.position, this.clockOrigin, false);
+      this.starting = false;
+      this.playing = true;
+      this.tick();
     } catch (error) {
-      if (!this.disposed && revision === this.revision) throw error;
+      if (!this.disposed && revision === this.revision) {
+        this.starting = false;
+        throw error;
+      }
+    }
+  }
+
+  /** Apply edits without stopping the transport or rewinding active video elements. */
+  async update(): Promise<void> {
+    if (this.disposed) return;
+    const update = ++this.updateRevision;
+    if (this.starting) return;
+    if (!this.playing) { await this.seek(this.currentPosition()); return; }
+    const revision = this.revision;
+    const project = this.getProject(), assets = this.getAssets();
+    const signature = audioConfiguration(project, assets);
+    const visuals = this.compositor.prepare(project, assets, false);
+    // Visual decode failures are still reported, including while audio processing is pending.
+    void visuals.catch(() => undefined);
+    const current = () => !this.disposed && this.playing && revision === this.revision && update === this.updateRevision;
+    try {
+      if (signature !== this.audioSignature) {
+        // Coalesce fast slider input before starting whole-buffer audio rendering.
+        await new Promise<void>(resolve => window.setTimeout(resolve, 35));
+        if (!current()) return;
+        const audio = await prepareAudio(project, assets);
+        if (!current() || signature !== audioConfiguration(this.getProject(), this.getAssets())) return;
+        const when = Math.max(this.audioContext!.currentTime + .015, this.clockOrigin);
+        const from = this.currentPosition(when);
+        this.installAudio(audio, from, when, true);
+        this.audioSignature = signature;
+      }
+      await visuals;
+    } catch (error) {
+      if (current()) throw error;
     }
   }
 
   pause(): void {
+    if (this.playing) this.position = this.currentPosition();
     this.revision++;
+    this.updateRevision++;
     this.playing = false;
+    this.starting = false;
     cancelAnimationFrame(this.frame);
-    for (const source of this.sources) { try { source.stop(); } catch { /* Already ended. */ } source.disconnect(); }
-    this.sources = [];
+    for (const session of [...this.sessions]) this.stopSession(session);
+    this.activeAudio = undefined;
     this.compositor.pauseVideos();
   }
 
-  async seek(time: number): Promise<void> {
+  async seek(time: number, resume = false): Promise<void> {
     if (this.disposed) return;
     this.pause();
+    this.position = Math.max(0, Math.min(projectDuration(this.getProject()), time));
     const revision = this.revision;
+    let shouldResume = false;
     try {
-      await this.compositor.seek(this.getProject(), this.getAssets(), Math.max(0, time));
-      if (revision === this.revision && !this.disposed) this.onTime(Math.max(0, time));
+      await this.compositor.seek(this.getProject(), this.getAssets(), this.position);
+      if (revision === this.revision && !this.disposed) {
+        this.onTime(this.position);
+        shouldResume = resume && this.position < projectDuration(this.getProject());
+      }
     } catch (error) {
       if (!this.disposed && revision === this.revision) throw error;
     }
+    if (shouldResume) await this.play(this.position);
   }
 
   dispose(): void {
@@ -482,6 +608,18 @@ async function finalizeWebm(blob: Blob, durationMs: number): Promise<Blob> {
   return new Blob([patched.buffer as ArrayBuffer, blob.slice(header.length)], { type: blob.type });
 }
 
+/** Stop awaiting preparation immediately on cancel; all late work keeps rejection handlers. */
+function awaitWithCancellation<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return work;
+  return new Promise<T>((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener('abort', cancel);
+    const cancel = () => { cleanup(); reject(new DOMException('Експорт скасовано.', 'AbortError')); };
+    signal.addEventListener('abort', cancel, { once: true });
+    work.then(value => { cleanup(); resolve(value); }, error => { cleanup(); reject(error); });
+    if (signal.aborted) cancel();
+  });
+}
+
 /** Real-time local composition. MediaRecorder writes native MP4 or WebM, with no upload. */
 export async function exportVideo(project: Project, assets: MediaAsset[], options: ExportOptions, onProgress: (progress: number) => void, signal?: AbortSignal): Promise<{ blob: Blob; extension: string }> {
   if (signal?.aborted) throw new DOMException('Експорт скасовано.', 'AbortError');
@@ -506,12 +644,16 @@ export async function exportVideo(project: Project, assets: MediaAsset[], option
   try {
     await context.resume();
     onProgress(0);
-    const [, audio] = await Promise.all([compositor.prepare(project, assets), prepareAudio(project, assets)]);
+    const [, audio] = await awaitWithCancellation(Promise.all([compositor.prepare(project, assets), prepareAudio(project, assets)]), signal);
     if (signal?.aborted) throw new DOMException('Експорт скасовано.', 'AbortError');
-    await compositor.seek(project, assets, 0);
+    await awaitWithCancellation(compositor.seek(project, assets, 0), signal);
     stream = canvas.captureStream(options.fps);
     for (const track of destination.stream.getAudioTracks()) stream.addTrack(track);
     recorder = new MediaRecorder(stream, { mimeType: format.mimeType, videoBitsPerSecond: Math.round(canvas.width * canvas.height * options.fps * .13), audioBitsPerSecond: 192000 });
+    // A visible tab is still required by browsers that throttle background video decoding.
+    const wakeNavigator = navigator as Navigator & { wakeLock?: { request(type: 'screen'): Promise<{ release(): Promise<void> }> } };
+    try { wakeLock = await wakeNavigator.wakeLock?.request('screen'); } catch { /* Optional display convenience. */ }
+    if (signal?.aborted) throw new DOMException('Експорт скасовано.', 'AbortError');
     const chunks: BlobPart[] = [];
     const complete = new Promise<Blob>((resolve, reject) => {
       recorder!.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
@@ -523,9 +665,6 @@ export async function exportVideo(project: Project, assets: MediaAsset[], option
       };
       signal?.addEventListener('abort', abortListener, { once: true });
     });
-    // A visible tab is still required by browsers that throttle background video decoding.
-    const wakeNavigator = navigator as Navigator & { wakeLock?: { request(type: 'screen'): Promise<{ release(): Promise<void> }> } };
-    try { wakeLock = await wakeNavigator.wakeLock?.request('screen'); } catch { /* Optional display convenience. */ }
     recorder.start(1000);
     const origin = context.currentTime + .08;
     sources = scheduleAudio(context, destination, audio, 0, origin);
