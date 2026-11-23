@@ -1,6 +1,6 @@
 import { useI18n } from "./i18n";
 import { useEffect, useRef, useState } from "react";
-import { AlertCircle, ArrowRight, Home as HomeIcon, Activity, ArrowDownToLine, AudioLines, Check, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Clapperboard, Clock3, Captions, Download, Film, FolderOpen, Layers, LoaderCircle, Maximize, Pause, Play, Plus, Settings2, ShieldCheck, SkipBack, SkipForward, SlidersHorizontal, WandSparkles, X } from "lucide-react";
+import { AlertCircle, ArrowRight, Home as HomeIcon, Activity, ArrowDownToLine, AudioLines, Check, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Clapperboard, ClipboardCopy, Clock3, Captions, Download, Film, FolderOpen, Layers, LoaderCircle, Maximize, Pause, Play, Plus, Settings2, ShieldCheck, SkipBack, SkipForward, SlidersHorizontal, WandSparkles, X } from "lucide-react";
 import Timeline from "./Timeline";
 import Inspector from "./Inspector";
 import SourcePreview from './SourcePreview';
@@ -8,12 +8,23 @@ import Home, { Brand, LanguageSwitch } from './Home';
 import Library, { type Panel } from './Library';
 import ProjectDialog, { type ProjectOptions } from './ProjectDialog';
 import { createEmptyProject, appendAssetsToProject } from './engine/workflow';
-import { TimelinePlayer, exportVideo, getExportFormats } from "./engine/media";
+import { TimelinePlayer, exportVideo, getExportFormats, visibleClips } from "./engine/media";
+import { canCopyOriginalFrame, encodeOriginalFrame, FrameCopyError, writeFrameToClipboard } from './engine/frame';
+import { captureAssetFrame } from './engine/original-frame';
 import { captureNoiseProfile, estimateOffset } from "./engine/audio";
 import { downloadBlob, downloadProject, importMedia, loadProject, parseProjectFile, parseSubtitles, saveProject, subtitlesToSrt, peekSavedProject, exportSavedProject, type SavedProjectSummary } from "./engine/project";
 import { defaultAudio, defaultVideo, projectDuration, timecode, uid, type MediaAsset, type Project } from "./types";
 type Modal = "export" | "sync" | "help" | "new" | "settings" | null;
 const errorText = (e: unknown) => e instanceof Error ? e.message : String(e);
+const frameErrorText = (error: unknown): string => {
+  if (!(error instanceof FrameCopyError)) return 'Не вдалося скопіювати повний кадр. Спробуйте ще раз.';
+  return {
+    unsupported: 'Копіювання зображень недоступне в цьому браузері. Відкрийте CutSync через HTTPS у браузері з підтримкою буфера зображень.',
+    'not-ready': 'Кадр ще не готовий. Дочекайтеся завантаження або завершення перемотування й спробуйте ще раз.',
+    permission: 'Браузер не дозволив копіювання. Дозвольте доступ до буфера обміну для CutSync й натисніть кнопку ще раз.',
+    capture: 'Не вдалося скопіювати повний кадр. Спробуйте ще раз.'
+  }[error.code];
+};
 export default function App() {
   const {
     t
@@ -27,6 +38,8 @@ export default function App() {
   const [recent, setRecent] = useState<SavedProjectSummary | null>(null),
     [sourceId, setSourceId] = useState<string | null>(null),
     [queuedFiles, setQueuedFiles] = useState<File[]>([]);
+  const [sourceFrame, setSourceFrame] = useState<HTMLVideoElement | HTMLImageElement | null>(null),
+    [copyingFrame, setCopyingFrame] = useState(false);
   const [toastKind, setToastKind] = useState<'info' | 'error'>('info');
   const editBase = useRef<Project | null>(null),
     sessionGeneration = useRef(0),
@@ -109,6 +122,7 @@ export default function App() {
     player.current?.pause();
     setPlaying(false);
     setSelected(null);
+    if (sourceId !== id) setSourceFrame(null);
     setSourceId(id);
   }
   function change(next: Project) {
@@ -571,6 +585,39 @@ export default function App() {
     }
   }
   const source = assets.find(a => a.id === sourceId);
+  const frameClips = visibleClips(project, assets, time);
+  const frameClip = frameClips[frameClips.length - 1];
+  const frameAsset = source || assets.find(a => a.id === frameClip?.assetId);
+  const clipboardAvailable = canCopyOriginalFrame();
+  const canCopyFrame = clipboardAvailable && !copyingFrame && !!frameAsset?.url && frameAsset.kind !== 'audio' && (!source || !!sourceFrame);
+  const copyFrameTitle = !clipboardAvailable
+    ? t('Копіювання зображень недоступне в цьому браузері. Відкрийте CutSync через HTTPS у браузері з підтримкою буфера зображень.')
+    : !frameAsset || frameAsset.kind === 'audio'
+      ? t('У позиції курсора немає відеокадру. Відкрийте відео або фото чи перемістіть курсор на відеокліп.')
+      : !frameAsset.url
+        ? t('Спочатку відновіть медіафайли')
+        : source && !sourceFrame
+          ? t('Зачекайте, поки кадр завантажиться.')
+          : `${t('PNG у повній роздільності, без обрізання, ефектів і субтитрів.')}\n${frameAsset.name}`;
+  function copyFrame() {
+    if (!canCopyFrame || !frameAsset) return;
+    const generation = sessionGeneration.current;
+    try {
+      const frame = source && sourceFrame
+        ? encodeOriginalFrame(sourceFrame)
+        : captureAssetFrame(frameAsset, frameClip!.in + time - frameClip!.start);
+      // Start the clipboard write during the click; PNG encoding can finish asynchronously.
+      const write = writeFrameToClipboard(frame);
+      setCopyingFrame(true);
+      void write.then(() => {
+        if (generation === sessionGeneration.current) notify('Повний кадр оригіналу скопійовано в буфер як PNG.');
+      }).catch(error => {
+        if (generation === sessionGeneration.current) notify(frameErrorText(error), 'error');
+      }).finally(() => setCopyingFrame(false));
+    } catch (error) {
+      notify(frameErrorText(error), 'error');
+    }
+  }
   const previewRatio = source?.width && source.height ? source.width / source.height : source?.kind === 'audio' ? 16 / 9 : project.width / project.height;
   const unplaced = assets.filter(a => a.url && !project.clips.some(c => c.assetId === a.id));
   const missingMedia = assets.filter(a => !a.url && project.clips.some(c => c.assetId === a.id));
@@ -776,7 +823,7 @@ export default function App() {
             } : c)
           });
         }} />
-    <main className="editor-main"><div className="viewer-heading"><div className="viewer-tabs"><button className={!source ? 'selected' : ''} onClick={() => setSourceId(null)}><Layers size={13} />{t('Послідовність')}</button>{source && <span className="source-tab selected"><Film size={13} />{t('Джерело')}<button className="tool" aria-label={t('Закрити джерело')} onClick={() => setSourceId(null)}><X size={12} /></button></span>}</div><div className="viewer-heading-tools"><button className="tool" title={t('Відкрити інспектор')} onClick={() => setInspectorOpen(true)}><Settings2 size={16} /></button><button className="tool" title={t('На весь екран')} onClick={() => void document.querySelector('.viewer-area')?.requestFullscreen().catch(() => notify('Повноекранний режим недоступний у цьому браузері.'))}><Maximize size={15} /></button></div></div>
+    <main className="editor-main"><div className="viewer-heading"><div className="viewer-tabs"><button className={!source ? 'selected' : ''} onClick={() => setSourceId(null)}><Layers size={13} />{t('Послідовність')}</button>{source && <span className="source-tab selected"><Film size={13} />{t('Джерело')}<button className="tool" aria-label={t('Закрити джерело')} onClick={() => setSourceId(null)}><X size={12} /></button></span>}</div><div className="viewer-heading-tools"><button className="secondary-button copy-frame-button" aria-label={t('Копіювати кадр оригіналу')} aria-busy={copyingFrame} disabled={!canCopyFrame} title={copyFrameTitle} onClick={copyFrame}>{copyingFrame ? <LoaderCircle size={14} className="spin" /> : <ClipboardCopy size={14} />}<span>{t(copyingFrame ? 'Копіюємо…' : 'Копіювати кадр')}</span></button><button className="tool" title={t('Відкрити інспектор')} onClick={() => setInspectorOpen(true)}><Settings2 size={16} /></button><button className="tool" title={t('На весь екран')} onClick={() => void document.querySelector('.viewer-area')?.requestFullscreen().catch(() => notify('Повноекранний режим недоступний у цьому браузері.'))}><Maximize size={15} /></button></div></div>
     <div className="viewer-area"><div className={`video-stage ${source ? 'source-mode' : ''}`} style={!source && !project.clips.length ? {
               width: '100%',
               height: '100%',
@@ -786,7 +833,7 @@ export default function App() {
               width: `min(100%, calc(100cqh * ${previewRatio}))`
             }}><canvas ref={canvas} width={project.width} height={project.height} aria-label={t('Попередній перегляд монтажу')} style={{
                 display: source ? 'none' : 'block'
-              }} onClick={() => void togglePlay()} />{source && <SourcePreview key={source.id} source={source} />}{!source && !project.clips.length && <div className="viewer-empty"><span className="empty-viewer-icon"><Clapperboard size={32} /></span><h2>{t(assets.length ? 'Матеріали готові до монтажу' : 'Тут буде ваша історія')}</h2><p>{t(assets.length ? 'Додайте файли з медіатеки на шкалу нижче.' : 'Імпортуйте відео, звук або фото. Почніть з одного файлу.')}</p>{unplaced.length > 0 && <button className="primary-button" onClick={addAll}><Plus size={15} />{t('Додати матеріали на шкалу')}</button>}</div>}</div></div>
+              }} onClick={() => void togglePlay()} />{source && <SourcePreview key={source.id} source={source} onFrameReady={setSourceFrame} />}{!source && !project.clips.length && <div className="viewer-empty"><span className="empty-viewer-icon"><Clapperboard size={32} /></span><h2>{t(assets.length ? 'Матеріали готові до монтажу' : 'Тут буде ваша історія')}</h2><p>{t(assets.length ? 'Додайте файли з медіатеки на шкалу нижче.' : 'Імпортуйте відео, звук або фото. Почніть з одного файлу.')}</p>{unplaced.length > 0 && <button className="primary-button" onClick={addAll}><Plus size={15} />{t('Додати матеріали на шкалу')}</button>}</div>}</div></div>
     {source ? <div className="source-transport"><div><small>{t('Перегляд оригіналу')}</small><span title={source.name}>{source.name}</span></div><button className="secondary-button" onClick={() => addAsset(source.id)}><Plus size={14} />{t('На шкалу')}</button><button className="tool" title={t('Повернутися до монтажу')} onClick={() => setSourceId(null)}><X size={17} /></button></div> : <div className="transport"><div className="time-display"><span>{timecode(time, project.fps)}<small>/ {timecode(duration, project.fps)}</small></span><label className="playhead-entry"><input aria-label={t('Позиція курсора, с')} title={t('Введіть точний час у секундах')} type="number" min="0" max={duration} step={1 / project.fps} value={timeDraft ?? Number(time.toFixed(3))} onFocus={() => setTimeDraft(String(Number(time.toFixed(3))))} onChange={e => setTimeDraft(e.target.value)} onBlur={() => {
                   if (timeDraft !== null && timeDraft.trim() && Number.isFinite(+timeDraft)) seek(+timeDraft);
                   setTimeDraft(null);
@@ -851,7 +898,7 @@ export default function App() {
                   setSyncMatch(null);
                   setSyncResult('');
                 }}><option value="">{t("Оберіть кліп")}</option>{audioClips.map(c => <option key={c.id} value={c.id}>{c.name} ({c.trackId.toUpperCase()})</option>)}</select></label></div><p className="panel-hint">{t("Порівнюємо звукові хвилі локально. Найкращий результат дають записи зі спільною мовою, музикою або оплесками.")}</p><button className="primary-button full-width" disabled={!!busy || !syncRef || !syncTarget || syncRef === syncTarget} onClick={() => void sync()}>{busy ? <LoaderCircle size={17} className="spin" /> : <WandSparkles size={17} />}{t("Знайти збіг")}</button>{syncResult && <div className="sync-result" role="status">{t(syncResult)}{syncMatch && <div className="sync-match-details"><strong>{syncMatch.offset >= 0 ? '+' : ''}{syncMatch.offset.toFixed(3)} {t('с')}</strong><span>{t('Впевненість')}: {Math.round(syncMatch.confidence * 100)}%</span></div>}</div>}{syncMatch && <><label className="sync-option"><input type="checkbox" checked={muteSynced} onChange={e => setMuteSynced(e.target.checked)} />{t('Вимкнути звук кліпу, що вирівнюється')}</label><button className="primary-button full-width sync-apply" onClick={applySync}><Check size={16} />{t('Застосувати вирівнювання')}</button></>}</>}</>}
- {modal === "help" && <><div className="modal-icon"><CircleHelp size={26} /></div><h2>{t("Монтуйте у своєму ритмі.")}</h2><p>{t("CutSync — ваша локальна монтажна студія.")}</p><div className="help-steps"><div><b>01</b><p><strong>{t("Додайте матеріали")}</strong><span>{t("Імпортуйте файли в медіатеку. Клік відкриває джерело для перегляду; кнопка + або перетягування додає його на шкалу.")}</span></p></div><div><b>02</b><p><strong>{t("Зберіть свою історію")}</strong><span>{t("Переміщуйте кліпи, тягніть за краї для обрізання, розрізайте в позиції курсора. V2 перекриває V1. Звук обох доріжок змішується.")}</span></p></div><div><b>03</b><p><strong>{t("Доведіть до досконалості")}</strong><span>{t("Виберіть кліп і налаштуйте колір та звук праворуч. Для очищення поставте курсор на ділянку лише з шумом і зніміть взірець.")}</span></p></div></div><div className="shortcuts">{[[t("Відтворення / пауза"), "Space"], [t("Розрізати кліп"), "S"], [t("Видалити вибране"), "Delete"], [t("Кадр назад / уперед"), "← / →"], [t("Скасувати / повторити"), "⌘ Z / ⌘ ⇧ Z"], [t("Зберегти проєкт у файл"), "⌘ S"]].map(([label, key]) => <div key={label}><span>{label}</span><kbd>{key}</kbd></div>)}</div><p className="help-privacy"><ShieldCheck size={17} />{t("Файли та зміни зберігаються у цьому браузері. JSON проєкту містить монтаж і назви файлів; збережіть оригінали окремо. Для відео зі звуком потрібен кодек, який браузер може декодувати. Автоматичної транскрипції немає; субтитри вводяться вручну або імпортуються з SRT / VTT.")}</p></>}
+ {modal === "help" && <><div className="modal-icon"><CircleHelp size={26} /></div><h2>{t("Монтуйте у своєму ритмі.")}</h2><p>{t("CutSync — ваша локальна монтажна студія.")}</p><div className="help-steps"><div><b>01</b><p><strong>{t("Додайте матеріали")}</strong><span>{t("Імпортуйте файли в медіатеку. Клік відкриває джерело для перегляду; кнопка + або перетягування додає його на шкалу.")}</span></p></div><div><b>02</b><p><strong>{t("Зберіть свою історію")}</strong><span>{t("Переміщуйте кліпи, тягніть за краї для обрізання, розрізайте в позиції курсора. V2 перекриває V1. Звук обох доріжок змішується.")}</span></p></div><div><b>03</b><p><strong>{t("Доведіть до досконалості")}</strong><span>{t("Виберіть кліп і налаштуйте колір та звук праворуч. Для очищення поставте курсор на ділянку лише з шумом і зніміть взірець.")}</span></p></div></div><p className="panel-hint">{t('Для розкадровки натисніть «Копіювати кадр» над переглядом. У джерелі копіюється поточний кадр; у монтажі — кадр верхньої видимої відеодоріжки в позиції курсора. PNG зберігає повний розмір оригіналу без ефектів, обрізання й субтитрів.')}</p><div className="shortcuts">{[[t("Відтворення / пауза"), "Space"], [t("Розрізати кліп"), "S"], [t("Видалити вибране"), "Delete"], [t("Кадр назад / уперед"), "← / →"], [t("Скасувати / повторити"), "⌘ Z / ⌘ ⇧ Z"], [t("Зберегти проєкт у файл"), "⌘ S"]].map(([label, key]) => <div key={label}><span>{label}</span><kbd>{key}</kbd></div>)}</div><p className="help-privacy"><ShieldCheck size={17} />{t("Файли та зміни зберігаються у цьому браузері. JSON проєкту містить монтаж і назви файлів; збережіть оригінали окремо. Для відео зі звуком потрібен кодек, який браузер може декодувати. Автоматичної транскрипції немає; субтитри вводяться вручну або імпортуються з SRT / VTT.")}</p></>}
  </section></div>}
   </div>;
 }

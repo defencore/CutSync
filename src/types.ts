@@ -36,7 +36,26 @@ export const defaultTracks = (): Track[] => TRACKS.map(track => ({ ...track }));
 export const defaultAudio = (): AudioEffects => ({ gain: 0, normalize: false, highpass: 20, lowpass: 20000, bass: 0, treble: 0, compressor: false, noiseReduction: 0 });
 export const defaultVideo = (): VideoEffects => ({ brightness: 1, contrast: 1, saturation: 1, temperature: 0, blur: 0, zoom: 1, rotation: 0, cropX: 0, cropY: 0, fadeIn: 0, fadeOut: 0, highlight: { enabled: false, x: .35, y: .25, width: .3, height: .5 } });
 export const projectDuration = (project: Project): number => Math.max(0, ...project.clips.map(c => c.start + c.duration), ...project.subtitles.map(s => s.end));
-export const uid = (): string => crypto.randomUUID();
+let localIdCounter = 0;
+export function uid(): string {
+  const cryptoApi = globalThis.crypto;
+  if (typeof cryptoApi?.randomUUID === 'function') {
+    try { return cryptoApi.randomUUID(); }
+    catch { /* Some browser contexts expose the method but reject its use. */ }
+  }
+  if (typeof cryptoApi?.getRandomValues === 'function') {
+    try {
+      const bytes = cryptoApi.getRandomValues(new Uint8Array(16));
+      bytes[6] = (bytes[6] & 0x0f) | 0x40;
+      bytes[8] = (bytes[8] & 0x3f) | 0x80;
+      const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+      return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    } catch { /* Client-only identifiers can still work when Web Crypto is unavailable. */ }
+  }
+  // These are local project identifiers, never credentials or security tokens.
+  const random = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  return `local-${Date.now().toString(36)}-${(++localIdCounter).toString(36)}-${random}`;
+}
 export const timecode = (seconds: number, fps = 25): string => {
  const totalFrames = Math.floor(Math.max(0, seconds) * fps + 1e-7);
  const wholeSeconds = Math.floor(totalFrames / fps);
