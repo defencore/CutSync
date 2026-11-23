@@ -1,5 +1,6 @@
 import { projectDuration, type Clip, type MediaAsset, type Project } from '../types';
 import { processAudioBuffer } from './audio';
+import { preparePlaybackSession } from './playback-session';
 
 export interface ExportFormat { label: string; mimeType: string; extension: string }
 export interface ExportOptions { width: number; height: number; fps: number; mimeType?: string }
@@ -43,24 +44,41 @@ export function clipOpacity(clip: Clip, time: number): number {
     clip.video.fadeOut > 0 ? (clip.duration - local) / clip.video.fadeOut : 1));
 }
 
-function awaitMedia(video: HTMLVideoElement, event: 'loadeddata' | 'seeked', ready: () => boolean): Promise<void> {
+function awaitMedia(video: HTMLVideoElement, event: 'loadeddata' | 'seeked', ready: () => boolean, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new DOMException('Decoder released.', 'AbortError'));
+  if (video.error) return Promise.reject(new Error('Браузер не підтримує декодування цього відео. Спробуйте MP4 / H.264 або WebM.'));
   if (ready()) return Promise.resolve();
   return new Promise((resolve, reject) => {
-    const timer = window.setTimeout(() => finish(new Error('Не вдалося прочитати відео. Перевірте формат файлу.')), 20000);
+    let settled = false;
     const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      video.removeEventListener(event, success);
+      clearInterval(poll);
+      video.removeEventListener(event, check);
       video.removeEventListener('error', failed);
+      signal?.removeEventListener('abort', aborted);
       error ? reject(error) : resolve();
     };
-    const success = () => finish();
+    const check = () => {
+      if (video.error) failed();
+      else if (ready()) finish();
+    };
     const failed = () => finish(new Error('Браузер не підтримує декодування цього відео. Спробуйте MP4 / H.264 або WebM.'));
-    video.addEventListener(event, success, { once: true });
-    video.addEventListener('error', failed, { once: true });
+    const aborted = () => finish(new DOMException('Decoder released.', 'AbortError'));
+    const timer = setTimeout(() => finish(new Error('Не вдалося прочитати відео. Перевірте формат файлу.')), 20000);
+    const poll = setInterval(check, 50);
+    video.addEventListener(event, check);
+    video.addEventListener('error', failed);
+    signal?.addEventListener('abort', aborted, { once: true });
+    check();
   });
 }
 
-interface VideoEntry { url: string; video: HTMLVideoElement; ready: Promise<void> }
+interface VideoEntry {
+  url: string; video: HTMLVideoElement; ready: Promise<void>; active: boolean;
+  failed: boolean; prime: (force?: boolean) => void; controller: AbortController;
+}
 interface ImageEntry { url: string; image: HTMLImageElement; ready: Promise<void> }
 
 class Compositor {
@@ -79,19 +97,64 @@ class Compositor {
   private ensureVideo(clip: Clip, asset: MediaAsset): VideoEntry {
     const prior = this.videos.get(clip.id);
     if (prior?.url === asset.url) return prior;
-    if (prior) { prior.video.pause(); prior.video.removeAttribute('src'); prior.video.load(); }
+    if (prior) { prior.controller.abort(); prior.video.pause(); prior.video.removeAttribute('src'); prior.video.load(); }
     const video = document.createElement('video');
     video.muted = true;
+    video.defaultMuted = true;
     video.playsInline = true;
     video.preload = 'auto';
     video.src = asset.url;
-    const ready = awaitMedia(video, 'loadeddata', () => video.readyState >= 2);
-    // Preload errors are handled by prepare / seek; avoid unhandled rejection meanwhile.
-    void ready.catch(() => undefined);
-    video.load();
-    const entry = { url: asset.url, video, ready };
+    const entry: VideoEntry = {
+      url: asset.url, video, ready: Promise.resolve(), active: false, failed: false,
+      prime: () => undefined, controller: new AbortController(),
+    };
+    const watch = () => {
+      entry.failed = false;
+      entry.ready = awaitMedia(video, 'loadeddata', () => video.readyState >= 2 && !video.seeking, entry.controller.signal).then(() => {
+        if (!entry.active) video.pause();
+      }, error => {
+        entry.failed = true;
+        if (!entry.active) video.pause();
+        throw error;
+      });
+      void entry.ready.catch(() => undefined);
+    };
+    let priming = false;
+    entry.prime = (force = false) => {
+      if (this.disposed || entry.controller.signal.aborted || video.error) return;
+      if (video.readyState >= 2) {
+        if (entry.failed) { entry.failed = false; entry.ready = Promise.resolve(); }
+        return;
+      }
+      if (entry.failed) watch();
+      if ((priming && !force) || entry.active) return;
+      priming = true;
+      try {
+        void Promise.resolve(video.play()).then(() => {
+          priming = false;
+          if (video.readyState >= 2 && !entry.active) video.pause();
+        }, () => { priming = false; });
+      } catch { priming = false; }
+    };
+    watch();
     this.videos.set(clip.id, entry);
+    video.load();
+    entry.prime();
     return entry;
+  }
+
+  /** Unlock new or deferred iOS decoders in the transport button's activation stack. */
+  prime(project: Project, assets: MediaAsset[]): void {
+    const media = new Map(assets.map(asset => [asset.id, asset]));
+    const tracks = new Set(project.tracks.filter(track => track.kind === 'video').map(track => track.id));
+    for (const clip of project.clips) {
+      const asset = media.get(clip.assetId);
+      if (tracks.has(clip.trackId) && asset?.kind === 'video' && !asset.demo) {
+        const existing = this.videos.get(clip.id);
+        const entry = this.ensureVideo(clip, asset);
+        if (entry === existing) entry.prime(true);
+      }
+    }
   }
 
   private ensureImage(asset: MediaAsset): ImageEntry {
@@ -116,7 +179,7 @@ class Compositor {
     for (const [id, entry] of this.videos) {
       const clip = clips.get(id);
       if (!clip || sources.get(clip.assetId)?.url !== entry.url) {
-        entry.video.pause(); entry.video.removeAttribute('src'); entry.video.load();
+        entry.controller.abort(); entry.video.pause(); entry.video.removeAttribute('src'); entry.video.load();
         this.videos.delete(id);
       }
     }
@@ -142,7 +205,7 @@ class Compositor {
         const target = Math.max(0, Math.min(clip.in, entry.video.duration - .001));
         if (Math.abs(entry.video.currentTime - target) > .015) {
           entry.video.currentTime = target;
-          await awaitMedia(entry.video, 'seeked', () => !entry.video.seeking && entry.video.readyState >= 2);
+          await awaitMedia(entry.video, 'seeked', () => !entry.video.seeking && entry.video.readyState >= 2, entry.controller.signal);
         }
       }
     }));
@@ -162,7 +225,7 @@ class Compositor {
       const desired = Math.max(0, Math.min(clip.in + time - clip.start, entry.video.duration - .001));
       if (Math.abs(entry.video.currentTime - desired) > .01) {
         entry.video.currentTime = desired;
-        await awaitMedia(entry.video, 'seeked', () => !entry.video.seeking && entry.video.readyState >= 2);
+        await awaitMedia(entry.video, 'seeked', () => !entry.video.seeking && entry.video.readyState >= 2, entry.controller.signal);
       }
     }));
     if (!this.disposed && revision === this.seekRevision) this.render(project, assets, time, false);
@@ -181,7 +244,8 @@ class Compositor {
     const active = visibleClips(project, assets, time);
     const ids = new Set(active.map(clip => clip.id));
     for (const [id, entry] of this.videos) {
-      if (!playing || !ids.has(id)) entry.video.pause();
+      entry.active = playing && ids.has(id);
+      if (!entry.active) entry.video.pause();
     }
     for (const clip of active) {
       const asset = map.get(clip.assetId)!;
@@ -194,6 +258,7 @@ class Compositor {
       } else {
         const entry = this.ensureVideo(clip, asset);
         const video = entry.video;
+        entry.active = playing;
         if (video.readyState < 2) continue;
         const desired = clip.in + time - clip.start;
         if (playing) {
@@ -259,11 +324,11 @@ class Compositor {
     ctx.restore();
   }
 
-  pauseVideos(): void { for (const entry of this.videos.values()) entry.video.pause(); }
+  pauseVideos(): void { for (const entry of this.videos.values()) { entry.active = false; entry.video.pause(); } }
   dispose(): void {
     this.disposed = true;
     for (const entry of this.videos.values()) {
-      entry.video.pause(); entry.video.removeAttribute('src'); entry.video.load();
+      entry.controller.abort(); entry.video.pause(); entry.video.removeAttribute('src'); entry.video.load();
     }
     this.videos.clear(); this.images.clear();
   }
@@ -421,8 +486,11 @@ export class TimelinePlayer {
     const duration = projectDuration(this.getProject());
     this.position = Math.max(0, from >= duration ? 0 : Math.min(duration, from));
     try {
+      preparePlaybackSession();
       const context = this.audioContext ??= new AudioContext();
-      await context.resume();
+      const resuming = context.resume();
+      this.compositor.prime(this.getProject(), this.getAssets());
+      await resuming;
       if (this.disposed || revision !== this.revision) return;
       let audio: { clip: Clip; buffer: AudioBuffer }[] = [];
       let signature = '';

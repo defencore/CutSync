@@ -215,3 +215,113 @@ describe('live playback updates', () => {
     expect(test.sourceNodes).toHaveLength(0);
   });
 });
+
+
+describe('iOS deferred timeline video decoding', () => {
+  let owned: TimelinePlayer | undefined;
+  afterEach(() => { owned?.dispose(); owned = undefined; vi.useRealTimers(); vi.unstubAllGlobals(); });
+  class DeferredVideo extends EventTarget {
+    readyState = 0; duration = 8; videoWidth = 3840; videoHeight = 2160;
+    muted = false; defaultMuted = false; playsInline = false; preload = ''; src = '';
+    paused = true; ended = false; seeking = false; error: { code: number } | null = null;
+    blocked = false; position = 0;
+    get currentTime() { return this.position; }
+    set currentTime(value: number) { this.position = value; this.seeking = true; }
+    play = vi.fn(() => {
+      if (this.blocked) return Promise.reject(new DOMException('Gesture required', 'NotAllowedError'));
+      this.paused = false; return Promise.resolve();
+    });
+    pause = vi.fn(() => { this.paused = true; });
+    load = vi.fn();
+    removeAttribute = vi.fn((name: string) => { if (name === 'src') this.src = ''; });
+  }
+  function setup(initiallyBlocked = false) {
+    vi.useFakeTimers();
+    const videos: DeferredVideo[] = [];
+    const context = {
+      currentTime: 0, destination: {}, resume: vi.fn(async () => undefined), close: vi.fn(async () => undefined),
+      createGain: () => ({ connect: vi.fn(), disconnect: vi.fn(), gain: { setValueAtTime: vi.fn(), linearRampToValueAtTime: vi.fn(), cancelScheduledValues: vi.fn() } }),
+    };
+    vi.stubGlobal('AudioContext', class { constructor() { return context; } });
+    vi.stubGlobal('window', { setTimeout, clearTimeout });
+    const callbacks = new Map<number, FrameRequestCallback>(); let id = 0;
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { callbacks.set(++id, callback); return id; });
+    vi.stubGlobal('cancelAnimationFrame', (value: number) => callbacks.delete(value));
+    vi.stubGlobal('document', { createElement: (tag: string) => {
+      if (tag !== 'video') throw new Error(`Unexpected element ${tag}`);
+      const video = new DeferredVideo(); video.blocked = initiallyBlocked; videos.push(video); return video;
+    } });
+    const rendering = new Proxy<Record<string, unknown>>({}, { get: (target, key: string) => target[key] ?? (() => undefined) });
+    const canvas = { width: 320, height: 180, getContext: () => rendering } as unknown as HTMLCanvasElement;
+    let value = project([{ ...makeClip('camera', 'v1'), duration: 8 }]);
+    const media = [{ ...asset('camera'), url: 'blob:iphone-mov', duration: 8 }];
+    const positions: number[] = [];
+    const player = new TimelinePlayer(canvas, () => value, () => media, time => positions.push(time));
+    owned = player;
+    return { player, videos, positions, context, callbacks, setProject: (next: Project) => { value = next; }, getProject: () => value };
+  }
+  it('primes muted inline decoding in the play click before awaiting and handles absent loadeddata', async () => {
+    const test = setup(), playing = test.player.play(0), video = test.videos[0];
+    expect(video.play).toHaveBeenCalled();
+    expect(video.muted).toBe(true); expect(video.defaultMuted).toBe(true); expect(video.playsInline).toBe(true);
+    video.readyState = 1; video.dispatchEvent(new Event('loadedmetadata'));
+    await vi.advanceTimersByTimeAsync(50); expect(test.positions).toEqual([]);
+    video.readyState = 2;
+    await vi.advanceTimersByTimeAsync(50); await playing;
+    expect(test.player.isPlaying).toBe(true); expect(test.positions[0]).toBe(0);
+  });
+  it('retries a deferred decoder when the user later presses play', async () => {
+    const test = setup(true), seek = test.player.seek(0), video = test.videos[0];
+    video.readyState = 1;
+    await vi.advanceTimersByTimeAsync(50);
+    const before = video.play.mock.calls.length;
+    video.blocked = false;
+    const playing = test.player.play(0);
+    expect(video.play.mock.calls.length).toBeGreaterThan(before);
+    video.readyState = 2;
+    await vi.advanceTimersByTimeAsync(50); await playing; await seek;
+    expect(test.player.isPlaying).toBe(true);
+  });
+  it('does not accept seeked while the requested frame is still seeking', async () => {
+    const test = setup();
+    test.setProject({ ...test.getProject(), clips: test.getProject().clips.map(clip => ({ ...clip, in: 2, duration: 6 })) });
+    const playing = test.player.play(0), video = test.videos[0];
+    video.readyState = 2;
+    await vi.advanceTimersByTimeAsync(50);
+    expect(video.currentTime).toBe(2); expect(video.seeking).toBe(true);
+    video.dispatchEvent(new Event('seeked'));
+    await vi.advanceTimersByTimeAsync(50); expect(test.positions).toEqual([]);
+    video.seeking = false;
+    await vi.advanceTimersByTimeAsync(50); await playing;
+    expect(test.player.isPlaying).toBe(true);
+  });
+  it('keeps an active video playing through live visual updates without re-priming', async () => {
+    const test = setup(), playing = test.player.play(0), video = test.videos[0];
+    video.readyState = 2; await vi.advanceTimersByTimeAsync(50); await playing;
+    test.context.currentTime = .1;
+    [...test.callbacks.values()].at(-1)!(0);
+    expect(video.paused).toBe(false);
+    const pauses = video.pause.mock.calls.length, plays = video.play.mock.calls.length;
+    test.setProject({ ...test.getProject(), clips: test.getProject().clips.map(clip => ({ ...clip, video: { ...clip.video, brightness: 1.3 } })) });
+    await test.player.update();
+    expect(video.pause).toHaveBeenCalledTimes(pauses);
+    expect(video.play).toHaveBeenCalledTimes(plays);
+    expect(video.paused).toBe(false);
+  });
+  it('releases readiness polls on disposal instead of retaining a blocked decoder', async () => {
+    const test = setup(), seek = test.player.seek(0), video = test.videos[0];
+    video.readyState = 1;
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    test.player.dispose(); await seek;
+    expect(vi.getTimerCount()).toBe(0); expect(video.src).toBe('');
+  });
+  it('can retry decoding after an earlier preload timed out', async () => {
+    const test = setup(), seek = test.player.seek(0), rejected = expect(seek).rejects.toThrow(), video = test.videos[0];
+    video.readyState = 1;
+    await vi.advanceTimersByTimeAsync(20000); await rejected;
+    const playing = test.player.play(0);
+    video.readyState = 2;
+    await vi.advanceTimersByTimeAsync(50); await playing;
+    expect(test.player.isPlaying).toBe(true);
+  });
+});

@@ -22,8 +22,17 @@ const frameErrorText = (error: unknown): string => {
     unsupported: 'Копіювання зображень недоступне в цьому браузері. Відкрийте CutSync через HTTPS у браузері з підтримкою буфера зображень.',
     'not-ready': 'Кадр ще не готовий. Дочекайтеся завантаження або завершення перемотування й спробуйте ще раз.',
     permission: 'Браузер не дозволив копіювання. Дозвольте доступ до буфера обміну для CutSync й натисніть кнопку ще раз.',
+    codec: 'Браузер не може прочитати відеокадр цього MOV. Спробуйте оригінал у форматі MP4 з H.264.',
     capture: 'Не вдалося скопіювати повний кадр. Спробуйте ще раз.'
   }[error.code];
+};
+const audioIssueText = (asset: MediaAsset): string => {
+  switch (asset.audioIssue?.code) {
+    case 'no-audio': return 'У файлі немає звукової доріжки.';
+    case 'unsupported-codec': return 'Браузер не підтримує звуковий кодек цього файлу. Додайте звук окремим WAV або MP3.';
+    case 'too-large': return 'Звукова доріжка завелика для обробки в цьому браузері. Імпортуйте коротший запис або окреме аудіо.';
+    default: return 'Не вдалося прочитати звукову доріжку. Додайте звук окремим WAV або MP3.';
+  }
 };
 export default function App() {
   const {
@@ -384,7 +393,9 @@ export default function App() {
       try {
         const importedAsset = await importMedia(f);
         imported.push(importedAsset);
-        if (importedAsset.kind === "video" && !importedAsset.audioBuffer) errors.push(`Звук «${f.name}» недоступний для обробки. Якщо у відео є звук, додайте його окремим WAV або MP3, інакше його не буде в монтажі та експорті.`);
+        if (importedAsset.kind === 'video' && !importedAsset.audioBuffer && importedAsset.audioIssue?.code !== 'no-audio') {
+          errors.push(`${f.name}: ${t(audioIssueText(importedAsset))}${importedAsset.audioIssue?.codec ? ` (${importedAsset.audioIssue.codec})` : ''}`);
+        }
       } catch (e) {
         errors.push(errorText(e));
       }
@@ -596,16 +607,18 @@ export default function App() {
       ? t('У позиції курсора немає відеокадру. Відкрийте відео або фото чи перемістіть курсор на відеокліп.')
       : !frameAsset.url
         ? t('Спочатку відновіть медіафайли')
-        : source && !sourceFrame
-          ? t('Зачекайте, поки кадр завантажиться.')
-          : `${t('PNG у повній роздільності, без обрізання, ефектів і субтитрів.')}\n${frameAsset.name}`;
+        : `${t('PNG у повній роздільності, без обрізання, ефектів і субтитрів.')}\n${frameAsset.name}`;
   function copyFrame() {
     if (!canCopyFrame || !frameAsset) return;
     const generation = sessionGeneration.current;
     try {
-      const frame = source && sourceFrame
+      const sourceReady = sourceFrame && ('videoWidth' in sourceFrame
+        ? sourceFrame.readyState >= 2 && !sourceFrame.seeking && !sourceFrame.error && sourceFrame.videoWidth > 0
+        : sourceFrame.complete && sourceFrame.naturalWidth > 0);
+      const sourceTime = sourceFrame && 'currentTime' in sourceFrame ? sourceFrame.currentTime : 0;
+      const frame = source && sourceFrame && sourceReady
         ? encodeOriginalFrame(sourceFrame)
-        : captureAssetFrame(frameAsset, frameClip!.in + time - frameClip!.start);
+        : captureAssetFrame(frameAsset, source ? sourceTime : frameClip!.in + time - frameClip!.start);
       // Start the clipboard write during the click; PNG encoding can finish asynchronously.
       const write = writeFrameToClipboard(frame);
       setCopyingFrame(true);
@@ -621,6 +634,8 @@ export default function App() {
   const previewRatio = source?.width && source.height ? source.width / source.height : source?.kind === 'audio' ? 16 / 9 : project.width / project.height;
   const unplaced = assets.filter(a => a.url && !project.clips.some(c => c.assetId === a.id));
   const missingMedia = assets.filter(a => !a.url && project.clips.some(c => c.assetId === a.id));
+  const unavailableAudio = assets.filter(a => a.kind === 'video' && !a.audioBuffer && a.audioIssue?.code !== 'no-audio' &&
+    project.clips.some(c => c.assetId === a.id && !c.muted && !project.mutedTracks.includes(c.trackId)));
   const canExport = duration > 0 && !missingMedia.length;
   function addAll() {
     const result = appendAssetsToProject(project, assets, {
@@ -833,7 +848,8 @@ export default function App() {
               width: `min(100%, calc(100cqh * ${previewRatio}))`
             }}><canvas ref={canvas} width={project.width} height={project.height} aria-label={t('Попередній перегляд монтажу')} style={{
                 display: source ? 'none' : 'block'
-              }} onClick={() => void togglePlay()} />{source && <SourcePreview key={source.id} source={source} onFrameReady={setSourceFrame} />}{!source && !project.clips.length && <div className="viewer-empty"><span className="empty-viewer-icon"><Clapperboard size={32} /></span><h2>{t(assets.length ? 'Матеріали готові до монтажу' : 'Тут буде ваша історія')}</h2><p>{t(assets.length ? 'Додайте файли з медіатеки на шкалу нижче.' : 'Імпортуйте відео, звук або фото. Почніть з одного файлу.')}</p>{unplaced.length > 0 && <button className="primary-button" onClick={addAll}><Plus size={15} />{t('Додати матеріали на шкалу')}</button>}</div>}</div></div>
+              }} onClick={() => void togglePlay()} />{source && <SourcePreview key={source.id} source={source} onFrameSource={setSourceFrame} onAudioError={() => notify('Звук оригіналу не вдалося запустити. Торкніться відео та спробуйте відтворення ще раз.', 'error')} />}{!source && !project.clips.length && <div className="viewer-empty"><span className="empty-viewer-icon"><Clapperboard size={32} /></span><h2>{t(assets.length ? 'Матеріали готові до монтажу' : 'Тут буде ваша історія')}</h2><p>{t(assets.length ? 'Додайте файли з медіатеки на шкалу нижче.' : 'Імпортуйте відео, звук або фото. Почніть з одного файлу.')}</p>{unplaced.length > 0 && <button className="primary-button" onClick={addAll}><Plus size={15} />{t('Додати матеріали на шкалу')}</button>}</div>}</div></div>
+    {source && (!clipboardAvailable || source.audioIssue) && <div className="source-media-note" role="status">{!clipboardAvailable && <span>{t('Копіювання зображень недоступне в цьому браузері. Відкрийте CutSync через HTTPS у браузері з підтримкою буфера зображень.')}</span>}{source.audioIssue && <span>{t(audioIssueText(source))}{source.audioIssue.codec && ` (${source.audioIssue.codec})`}</span>}</div>}
     {source ? <div className="source-transport"><div><small>{t('Перегляд оригіналу')}</small><span title={source.name}>{source.name}</span></div><button className="secondary-button" onClick={() => addAsset(source.id)}><Plus size={14} />{t('На шкалу')}</button><button className="tool" title={t('Повернутися до монтажу')} onClick={() => setSourceId(null)}><X size={17} /></button></div> : <div className="transport"><div className="time-display"><span>{timecode(time, project.fps)}<small>/ {timecode(duration, project.fps)}</small></span><label className="playhead-entry"><input aria-label={t('Позиція курсора, с')} title={t('Введіть точний час у секундах')} type="number" min="0" max={duration} step={1 / project.fps} value={timeDraft ?? Number(time.toFixed(3))} onFocus={() => setTimeDraft(String(Number(time.toFixed(3))))} onChange={e => setTimeDraft(e.target.value)} onBlur={() => {
                   if (timeDraft !== null && timeDraft.trim() && Number.isFinite(+timeDraft)) seek(+timeDraft);
                   setTimeDraft(null);
@@ -888,7 +904,7 @@ export default function App() {
         }}><X size={20} /></button>
  {modal === "export" && <><div className="modal-icon"><ArrowDownToLine size={25} /></div><h2>{t("Історія готова до перегляду.")}</h2><p>{t("Перевірте початок і кінець, звук та субтитри перед експортом.")}</p><div className="export-summary"><div className="export-thumbnail" style={{
               backgroundImage: `url('${assets.find(a => a.thumbnail)?.thumbnail || ""}')`
-            }}><Play size={24} /></div><div><strong>{project.name}</strong><span>{timecode(duration)} · {project.fps} fps · {project.clips.length} {t("кліпів")}</span></div></div><div className="modal-fields"><label>{t("Роздільність")}<select value={exportSize} disabled={progress !== null} onChange={e => setExportSize(e.target.value)}><option value="source">{t('Розмір проєкту')} · {project.width} × {project.height}</option>{['1080', '720', '480'].filter(edge => outputSize(edge).height !== project.height || outputSize(edge).width !== project.width).map(edge => <option value={edge} key={edge}>{edge}p · {outputSize(edge).width} × {outputSize(edge).height}</option>)}</select></label><label>{t("Формат")}<select value={exportFormat || formats[0]?.mimeType || ""} disabled={progress !== null} onChange={e => setExportFormat(e.target.value)}>{formats.map(f => <option key={f.mimeType} value={f.mimeType}>{f.label}</option>)}</select></label></div>{!formats.length && <p className="error-message">{t("Браузер не підтримує відеоекспорт. Відкрийте CutSync в актуальному Chrome, Edge або Safari.")}</p>}{missingMedia.length > 0 && <p className="error-message">{t("Є втрачені медіафайли. Імпортуйте оригінали перед експортом.")}</p>}<div className="export-notice"><Clock3 size={17} /><p>{t("Обробка відбувається в реальному часі.")}<span>{t("Не закривайте та не приховуйте цю вкладку до завершення. Доступні формати залежать від браузера.")}</span></p></div>{progress !== null ? <><div className="export-progress"><span>{t("Створюємо ваше відео")}<strong>{Math.round(progress * 100)}%</strong></span><progress max="1" value={progress} /></div><button className="secondary-button full-width" onClick={() => abort.current?.abort()}>{t("Скасувати експорт")}</button></> : <button className="primary-button full-width" disabled={!formats.length || !canExport} onClick={() => void doExport()}><Download size={17} />{t("Експортувати відео")}</button>}<div className="modal-private"><ShieldCheck size={13} />{t("Без сервера. Без завантаження ваших файлів.")}</div></>}
+            }}><Play size={24} /></div><div><strong>{project.name}</strong><span>{timecode(duration)} · {project.fps} fps · {project.clips.length} {t("кліпів")}</span></div></div><div className="modal-fields"><label>{t("Роздільність")}<select value={exportSize} disabled={progress !== null} onChange={e => setExportSize(e.target.value)}><option value="source">{t('Розмір проєкту')} · {project.width} × {project.height}</option>{['1080', '720', '480'].filter(edge => outputSize(edge).height !== project.height || outputSize(edge).width !== project.width).map(edge => <option value={edge} key={edge}>{edge}p · {outputSize(edge).width} × {outputSize(edge).height}</option>)}</select></label><label>{t("Формат")}<select value={exportFormat || formats[0]?.mimeType || ""} disabled={progress !== null} onChange={e => setExportFormat(e.target.value)}>{formats.map(f => <option key={f.mimeType} value={f.mimeType}>{f.label}</option>)}</select></label></div>{unavailableAudio.length > 0 && <p className="error-message" role="status">{t('Експорт не міститиме звуку з цих файлів')}: {unavailableAudio.map(a => a.name + (a.audioIssue?.codec ? ` (${a.audioIssue.codec})` : '')).join(', ')}.</p>}{!formats.length && <p className="error-message">{t("Браузер не підтримує відеоекспорт. Відкрийте CutSync в актуальному Chrome, Edge або Safari.")}</p>}{missingMedia.length > 0 && <p className="error-message">{t("Є втрачені медіафайли. Імпортуйте оригінали перед експортом.")}</p>}<div className="export-notice"><Clock3 size={17} /><p>{t("Обробка відбувається в реальному часі.")}<span>{t("Не закривайте та не приховуйте цю вкладку до завершення. Доступні формати залежать від браузера.")}</span></p></div>{progress !== null ? <><div className="export-progress"><span>{t("Створюємо ваше відео")}<strong>{Math.round(progress * 100)}%</strong></span><progress max="1" value={progress} /></div><button className="secondary-button full-width" onClick={() => abort.current?.abort()}>{t("Скасувати експорт")}</button></> : <button className="primary-button full-width" disabled={!formats.length || !canExport} onClick={() => void doExport()}><Download size={17} />{t("Експортувати відео")}</button>}<div className="modal-private"><ShieldCheck size={13} />{t("Без сервера. Без завантаження ваших файлів.")}</div></>}
  {modal === "sync" && <><div className="modal-icon"><Activity size={26} /></div><h2>{t("Один момент. Різні ракурси.")}</h2><p>{t("Спочатку знайдіть збіг, потім застосуйте вирівнювання.")}</p>{audioClips.length < 2 ? <div className="empty-sync"><AudioLines size={30} /><p>{t("Додайте на шкалу щонайменше два кліпи зі звуком — наприклад, відео з камери та запис рекордера.")}</p></div> : <><div className="modal-fields single"><label>{t("Еталонний запис")}<select value={syncRef} onChange={e => {
                   setSyncRef(e.target.value);
                   setSyncMatch(null);
@@ -898,7 +914,7 @@ export default function App() {
                   setSyncMatch(null);
                   setSyncResult('');
                 }}><option value="">{t("Оберіть кліп")}</option>{audioClips.map(c => <option key={c.id} value={c.id}>{c.name} ({c.trackId.toUpperCase()})</option>)}</select></label></div><p className="panel-hint">{t("Порівнюємо звукові хвилі локально. Найкращий результат дають записи зі спільною мовою, музикою або оплесками.")}</p><button className="primary-button full-width" disabled={!!busy || !syncRef || !syncTarget || syncRef === syncTarget} onClick={() => void sync()}>{busy ? <LoaderCircle size={17} className="spin" /> : <WandSparkles size={17} />}{t("Знайти збіг")}</button>{syncResult && <div className="sync-result" role="status">{t(syncResult)}{syncMatch && <div className="sync-match-details"><strong>{syncMatch.offset >= 0 ? '+' : ''}{syncMatch.offset.toFixed(3)} {t('с')}</strong><span>{t('Впевненість')}: {Math.round(syncMatch.confidence * 100)}%</span></div>}</div>}{syncMatch && <><label className="sync-option"><input type="checkbox" checked={muteSynced} onChange={e => setMuteSynced(e.target.checked)} />{t('Вимкнути звук кліпу, що вирівнюється')}</label><button className="primary-button full-width sync-apply" onClick={applySync}><Check size={16} />{t('Застосувати вирівнювання')}</button></>}</>}</>}
- {modal === "help" && <><div className="modal-icon"><CircleHelp size={26} /></div><h2>{t("Монтуйте у своєму ритмі.")}</h2><p>{t("CutSync — ваша локальна монтажна студія.")}</p><div className="help-steps"><div><b>01</b><p><strong>{t("Додайте матеріали")}</strong><span>{t("Імпортуйте файли в медіатеку. Клік відкриває джерело для перегляду; кнопка + або перетягування додає його на шкалу.")}</span></p></div><div><b>02</b><p><strong>{t("Зберіть свою історію")}</strong><span>{t("Переміщуйте кліпи, тягніть за краї для обрізання, розрізайте в позиції курсора. V2 перекриває V1. Звук обох доріжок змішується.")}</span></p></div><div><b>03</b><p><strong>{t("Доведіть до досконалості")}</strong><span>{t("Виберіть кліп і налаштуйте колір та звук праворуч. Для очищення поставте курсор на ділянку лише з шумом і зніміть взірець.")}</span></p></div></div><p className="panel-hint">{t('Для розкадровки натисніть «Копіювати кадр» над переглядом. У джерелі копіюється поточний кадр; у монтажі — кадр верхньої видимої відеодоріжки в позиції курсора. PNG зберігає повний розмір оригіналу без ефектів, обрізання й субтитрів.')}</p><div className="shortcuts">{[[t("Відтворення / пауза"), "Space"], [t("Розрізати кліп"), "S"], [t("Видалити вибране"), "Delete"], [t("Кадр назад / уперед"), "← / →"], [t("Скасувати / повторити"), "⌘ Z / ⌘ ⇧ Z"], [t("Зберегти проєкт у файл"), "⌘ S"]].map(([label, key]) => <div key={label}><span>{label}</span><kbd>{key}</kbd></div>)}</div><p className="help-privacy"><ShieldCheck size={17} />{t("Файли та зміни зберігаються у цьому браузері. JSON проєкту містить монтаж і назви файлів; збережіть оригінали окремо. Для відео зі звуком потрібен кодек, який браузер може декодувати. Автоматичної транскрипції немає; субтитри вводяться вручну або імпортуються з SRT / VTT.")}</p></>}
+ {modal === "help" && <><div className="modal-icon"><CircleHelp size={26} /></div><h2>{t("Монтуйте у своєму ритмі.")}</h2><p>{t("CutSync — ваша локальна монтажна студія.")}</p><div className="help-steps"><div><b>01</b><p><strong>{t("Додайте матеріали")}</strong><span>{t("Імпортуйте файли в медіатеку. Клік відкриває джерело для перегляду; кнопка + або перетягування додає його на шкалу.")}</span></p></div><div><b>02</b><p><strong>{t("Зберіть свою історію")}</strong><span>{t("Переміщуйте кліпи, тягніть за краї для обрізання, розрізайте в позиції курсора. V2 перекриває V1. Звук обох доріжок змішується.")}</span></p></div><div><b>03</b><p><strong>{t("Доведіть до досконалості")}</strong><span>{t("Виберіть кліп і налаштуйте колір та звук праворуч. Для очищення поставте курсор на ділянку лише з шумом і зніміть взірець.")}</span></p></div></div><p className="panel-hint">{t('Для розкадровки натисніть «Копіювати кадр» над переглядом. У джерелі копіюється поточний кадр; у монтажі — кадр верхньої видимої відеодоріжки в позиції курсора. PNG зберігає повний розмір оригіналу без ефектів, обрізання й субтитрів.')}</p><div className="shortcuts">{[[t("Відтворення / пауза"), "Space"], [t("Розрізати кліп"), "S"], [t("Видалити вибране"), "Delete"], [t("Кадр назад / уперед"), "← / →"], [t("Скасувати / повторити"), "⌘ Z / ⌘ ⇧ Z"], [t("Зберегти проєкт у файл"), "⌘ S"]].map(([label, key]) => <div key={label}><span>{label}</span><kbd>{key}</kbd></div>)}</div><p className="help-privacy"><ShieldCheck size={17} />{t("Файли та зміни зберігаються у цьому браузері. JSON проєкту містить монтаж і назви файлів; збережіть оригінали окремо. Для відео зі звуком потрібен кодек, який браузер може декодувати. Автоматичної транскрипції немає; субтитри вводяться вручну або імпортуються з SRT / VTT.")}</p><a className="help-license" href="./third-party-notices.txt" target="_blank" rel="noopener noreferrer">{t('Ліцензії сторонніх компонентів')}</a></>}
  </section></div>}
   </div>;
 }

@@ -18,15 +18,18 @@ class WatchedElement extends EventTarget {
   get listenerCount() { return [...this.listeners.values()].reduce((count, entries) => count + entries.size, 0); }
 }
 class Video extends WatchedElement {
+  static playError: Error | null = null;
   readyState = 0; duration = NaN; videoWidth = 3840; videoHeight = 2160;
-  seeking = false; preload = ''; muted = false; playsInline = false;
+  seeking = false; preload = ''; muted = false; defaultMuted = false; playsInline = false;
+  error: { code: number } | null = null;
   private time = 0;
   seeks: number[] = [];
   get currentTime() { return this.time; }
   set currentTime(value: number) { this.time = value; this.seeking = true; this.seeks.push(value); }
-  load = vi.fn(); pause = vi.fn();
+  load = vi.fn(); pause = vi.fn(); play = vi.fn(() => Video.playError ? Promise.reject(Video.playError) : Promise.resolve());
   metadata(duration = 10) { this.duration = duration; this.readyState = 1; this.dispatchEvent(new Event('loadedmetadata')); }
-  frame(time: number, emitSeeked = true) { this.time = time; this.readyState = 2; this.seeking = false; this.dispatchEvent(new Event(emitSeeked ? 'seeked' : 'loadeddata')); }
+  quietFrame(time: number) { this.time = time; this.readyState = 2; this.seeking = false; }
+  frame(time: number, emitSeeked = true) { this.quietFrame(time); this.dispatchEvent(new Event(emitSeeked ? 'seeked' : 'loadeddata')); }
 }
 class ImageSource extends WatchedElement {
   complete = false; naturalWidth = 6000; naturalHeight = 4000; decoding = '';
@@ -38,7 +41,7 @@ const flush = async () => { await Promise.resolve(); await Promise.resolve(); };
 describe('independent original frame capture', () => {
   let videos: Video[], images: ImageSource[], encodings: { width: number; height: number; type: string; source: unknown; time?: number }[];
   beforeEach(() => {
-    videos = []; images = []; encodings = [];
+    videos = []; images = []; encodings = []; Video.playError = null;
     vi.useFakeTimers(); vi.stubGlobal('HTMLVideoElement', Video); vi.stubGlobal('HTMLImageElement', ImageSource);
     vi.stubGlobal('document', { createElement: (tag: string) => {
       if (tag === 'video') { const video = new Video(); videos.push(video); return video; }
@@ -64,18 +67,20 @@ describe('independent original frame capture', () => {
     const original = asset(), capture = captureAssetFrame(original, 3.125);
     expect(videos).toHaveLength(1); const decoder = videos[0];
     expect(decoder.src).toBe('blob:original'); expect(decoder.muted).toBe(true);
-    decoder.metadata(); await flush(); expect(decoder.seeks).toEqual([3.125]);
+    expect(decoder.play).toHaveBeenCalledOnce(); expect(decoder.playsInline).toBe(true); expect(decoder.defaultMuted).toBe(true);
+    decoder.metadata(); await flush(); expect(decoder.seeks).toEqual([]);
+    decoder.frame(0, false); await flush(); expect(decoder.seeks).toEqual([3.125]);
     decoder.readyState = 2; decoder.dispatchEvent(new Event('loadeddata')); await flush(); expect(encodings).toEqual([]);
     decoder.frame(3); await flush(); expect(encodings).toEqual([]);
     decoder.frame(3.125); const blob = await capture;
     expect(blob.type).toBe('image/png'); expect(encodings).toEqual([{ width: 3840, height: 2160, type: 'image/png', source: decoder, time: 3.125 }]);
-    expect(decoder.src).toBe(''); expect(decoder.pause).toHaveBeenCalledOnce(); expect(decoder.load).toHaveBeenCalledTimes(2); expect(decoder.listenerCount).toBe(0);
+    expect(decoder.src).toBe(''); expect(decoder.pause).toHaveBeenCalledTimes(2); expect(decoder.load).toHaveBeenCalledTimes(2); expect(decoder.listenerCount).toBe(0);
     expect(original.url).toBe('blob:original'); expect(original.width).toBe(320); expect(vi.getTimerCount()).toBe(0);
   });
 
   it('captures the click-time snapshot even if the asset descriptor later changes', async () => {
     const source = asset(), capture = captureAssetFrame(source, 1.25), decoder = videos[0];
-    source.url = 'blob:another'; source.kind = 'audio'; decoder.metadata(); await flush();
+    source.url = 'blob:another'; source.kind = 'audio'; decoder.metadata(); await flush(); decoder.frame(0, false); await flush();
     expect(decoder.seeks).toEqual([1.25]); decoder.frame(1.25); await capture;
     expect(encodings[0].time).toBe(1.25); expect(images).toHaveLength(0);
   });
@@ -87,9 +92,65 @@ describe('independent original frame capture', () => {
   });
 
   it('captures the last valid frame when a paused player points to the end', async () => {
-    const capture = captureAssetFrame(asset(), 10), decoder = videos[0]; decoder.metadata(); await flush();
+    const capture = captureAssetFrame(asset(), 10), decoder = videos[0]; decoder.metadata(); await flush(); decoder.frame(0, false); await flush();
     expect(decoder.seeks[0]).toBeCloseTo(9.999); decoder.frame(decoder.seeks[0]); await capture;
     expect(encodings[0].time).toBeCloseTo(9.999);
+  });
+
+  it('decodes metadata-only iOS media after a synchronous muted play request without loadeddata', async () => {
+    const capture = captureAssetFrame(asset(), 0), decoder = videos[0];
+    expect(decoder.play).toHaveBeenCalledOnce();
+    decoder.metadata(); await flush();
+    expect(encodings).toEqual([]);
+    decoder.readyState = 2;
+    await vi.advanceTimersByTimeAsync(50);
+    await capture;
+    expect(encodings[0]).toMatchObject({ width: 3840, height: 2160, time: 0 });
+    expect(decoder.listenerCount).toBe(0); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('pauses primed playback then seeks back to the exact click-time frame', async () => {
+    const capture = captureAssetFrame(asset(), 0), decoder = videos[0];
+    decoder.metadata(); await flush();
+    decoder.frame(.12, false); await flush();
+    expect(decoder.pause).toHaveBeenCalledOnce();
+    expect(decoder.seeks).toEqual([0]);
+    expect(encodings).toEqual([]);
+    decoder.frame(0); await capture;
+    expect(encodings[0].time).toBe(0);
+  });
+
+  it('checks actual seek state even when no seeked or loadeddata event arrives', async () => {
+    const capture = captureAssetFrame(asset(), 2.5), decoder = videos[0];
+    decoder.metadata(); await flush(); decoder.frame(0, false); await flush();
+    decoder.seeking = true; decoder.readyState = 2;
+    await vi.advanceTimersByTimeAsync(50); expect(encodings).toEqual([]);
+    decoder.quietFrame(2.5);
+    await vi.advanceTimersByTimeAsync(50); await capture;
+    expect(encodings[0].time).toBe(2.5); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('reports unsupported codec errors separately and releases the private decoder', async () => {
+    const capture = captureAssetFrame(asset(), 0), rejected = expect(capture).rejects.toMatchObject({ code: 'codec' }), decoder = videos[0];
+    decoder.error = { code: 4 }; decoder.dispatchEvent(new Event('error'));
+    await rejected;
+    expect(decoder.listenerCount).toBe(0); expect(decoder.src).toBe(''); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not leave an iOS blocked-play promise or readiness poll running', async () => {
+    Video.playError = new DOMException('Playback requires a gesture', 'NotAllowedError');
+    const capture = captureAssetFrame(asset(), 0), decoder = videos[0];
+    const rejected = expect(capture).rejects.toMatchObject({ code: 'not-ready' });
+    await vi.advanceTimersByTimeAsync(50); await rejected;
+    expect(decoder.src).toBe(''); expect(decoder.listenerCount).toBe(0); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('reports an unsupported play promise as a codec failure', async () => {
+    Video.playError = new DOMException('Unsupported MOV codec', 'NotSupportedError');
+    const capture = captureAssetFrame(asset(), 0), decoder = videos[0];
+    const rejected = expect(capture).rejects.toMatchObject({ code: 'codec' });
+    await vi.advanceTimersByTimeAsync(50); await rejected;
+    expect(decoder.src).toBe(''); expect(decoder.listenerCount).toBe(0); expect(vi.getTimerCount()).toBe(0);
   });
 
   it.each([false, true])('captures full-size images including demo video descriptors (%s)', async demo => {
@@ -101,9 +162,9 @@ describe('independent original frame capture', () => {
 
   it('releases the decoder and listeners on a seek timeout', async () => {
     const capture = captureAssetFrame(asset(), 3), rejected = expect(capture).rejects.toMatchObject({ code: 'not-ready' }), decoder = videos[0];
-    decoder.metadata(); await flush(); decoder.readyState = 2;
+    decoder.metadata(); await flush(); decoder.frame(0, false); await flush();
     await vi.advanceTimersByTimeAsync(20000); await rejected;
-    expect(encodings).toEqual([]); expect(decoder.listenerCount).toBe(0); expect(decoder.src).toBe(''); expect(decoder.pause).toHaveBeenCalledOnce(); expect(vi.getTimerCount()).toBe(0);
+    expect(encodings).toEqual([]); expect(decoder.listenerCount).toBe(0); expect(decoder.src).toBe(''); expect(decoder.pause).toHaveBeenCalledTimes(2); expect(vi.getTimerCount()).toBe(0);
   });
 
   it('releases the image on decoding errors and does not encode a missing frame', async () => {

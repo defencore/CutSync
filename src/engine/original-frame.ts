@@ -2,21 +2,35 @@ import type { MediaAsset } from '../types';
 import { encodeOriginalFrame, FrameCopyError } from './frame';
 
 const READ_TIMEOUT_MS = 20000;
+const POLL_INTERVAL_MS = 50;
 const SEEK_TOLERANCE = .005;
 
-/** Listens before starting a load or seek, and removes every listener on all outcomes. */
+function decodeFailure(element: HTMLImageElement | HTMLVideoElement, cause?: unknown): FrameCopyError {
+  const code = 'error' in element ? element.error?.code : undefined;
+  const unsupported = code === 3 || code === 4 || cause instanceof Error && cause.name === 'NotSupportedError';
+  return new FrameCopyError(unsupported ? 'codec' : 'capture', undefined, { cause });
+}
+
+function playbackFailure(error: unknown): FrameCopyError | undefined {
+  if (error instanceof Error && error.name === 'AbortError') return;
+  if (error instanceof Error && error.name === 'NotSupportedError') return new FrameCopyError('codec', undefined, { cause: error });
+  return new FrameCopyError('not-ready', 'The browser could not start decoding the original video. Start its playback and try again.', { cause: error });
+}
+
+/** Read state as well as events: mobile data-saver modes can suppress loadeddata. */
 function waitUntil(
   element: HTMLImageElement | HTMLVideoElement,
   events: string[],
   ready: () => boolean,
   start: () => void,
-  onEvent?: (event: Event) => void,
+  issue?: () => FrameCopyError | undefined,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     let finished = false;
     const cleanup = () => {
       clearTimeout(timer);
-      for (const event of events) element.removeEventListener(event, changed);
+      clearInterval(poll);
+      for (const event of events) element.removeEventListener(event, check);
       element.removeEventListener('error', failed);
     };
     const finish = (error?: Error) => {
@@ -25,20 +39,28 @@ function waitUntil(
       cleanup();
       error ? reject(error) : resolve();
     };
-    const check = () => { if (ready()) finish(); };
-    const changed = (event: Event) => { onEvent?.(event); check(); };
-    const failed = () => finish(new FrameCopyError('capture', 'Could not decode the original media source.'));
+    const check = () => {
+      if (finished) return;
+      try {
+        if ('error' in element && element.error) { finish(decodeFailure(element)); return; }
+        if (ready()) { finish(); return; }
+        const failure = issue?.();
+        if (failure) finish(failure);
+      } catch (error) { finish(decodeFailure(element, error)); }
+    };
+    const failed = () => finish(decodeFailure(element));
     const timer = setTimeout(() => finish(new FrameCopyError('not-ready', 'The original frame could not be decoded in time.')), READ_TIMEOUT_MS);
-    for (const event of events) element.addEventListener(event, changed);
+    const poll = setInterval(check, POLL_INTERVAL_MS);
+    for (const event of events) element.addEventListener(event, check);
     element.addEventListener('error', failed);
     try { start(); check(); }
-    catch (error) { finish(new FrameCopyError('capture', 'Could not load the requested original frame.', { cause: error })); }
+    catch (error) { finish(decodeFailure(element, error)); }
   });
 }
 
 /**
- * Captures the requested original frame through a private decoder at natural resolution.
- * The URL, type, and timestamp are snapshotted before waiting; no preview element is touched.
+ * Invoke directly from the copy click so iOS can unlock this private decoder before awaiting.
+ * The descriptor and timestamp are snapshotted; no source viewer or timeline element is touched.
  */
 export async function captureAssetFrame(asset: MediaAsset, sourceTime: number): Promise<Blob> {
   const { url, kind, demo } = asset;
@@ -58,19 +80,32 @@ export async function captureAssetFrame(asset: MediaAsset, sourceTime: number): 
   const video = document.createElement('video');
   video.preload = 'auto';
   video.muted = true;
+  video.defaultMuted = true;
   video.playsInline = true;
   video.crossOrigin = 'anonymous';
+  let playIssue: FrameCopyError | undefined;
+  const issue = () => playIssue;
   try {
-    await waitUntil(video, ['loadedmetadata', 'loadeddata'], () => video.readyState >= 1, () => { video.src = url; video.load(); });
+    await waitUntil(video, ['loadedmetadata', 'loadeddata', 'durationchange'], () => video.readyState >= 1, () => {
+      video.src = url;
+      video.load();
+      // The play call itself stays in the original user-activation stack, before any await.
+      try { void video.play().catch(error => { playIssue = playbackFailure(error); }); }
+      catch (error) { playIssue = playbackFailure(error); }
+    }, issue);
     if (!Number.isFinite(video.duration) || video.duration <= 0) throw new FrameCopyError('not-ready');
-    // Seeking to the duration itself has no frame; use the last valid instant at the end.
+    // Safari can honor preload only through metadata. Decode one frame before pausing/seeking.
+    await waitUntil(video, ['loadeddata', 'canplay', 'playing', 'timeupdate', 'progress'],
+      () => video.readyState >= 2 && !video.seeking && video.videoWidth > 0 && video.videoHeight > 0,
+      () => undefined, issue,
+    );
+    video.pause();
+    // Seeking to duration itself has no frame; use the last valid instant at the end.
     const target = Math.min(requestedTime, Math.max(0, video.duration - Math.min(.001, video.duration / 2)));
     const needsSeek = video.seeking || Math.abs(video.currentTime - target) > 1e-7;
-    let seekComplete = !needsSeek;
-    await waitUntil(video, ['seeked', 'loadeddata', 'canplay'],
-      () => seekComplete && !video.seeking && video.readyState >= 2 && Math.abs(video.currentTime - target) <= SEEK_TOLERANCE,
+    await waitUntil(video, ['seeked', 'loadeddata', 'canplay', 'timeupdate'],
+      () => !video.seeking && video.readyState >= 2 && Math.abs(video.currentTime - target) <= SEEK_TOLERANCE,
       () => { if (needsSeek) video.currentTime = target; },
-      event => { if (event.type === 'seeked') seekComplete = true; },
     );
     return await encodeOriginalFrame(video);
   } finally {

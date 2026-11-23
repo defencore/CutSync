@@ -1,4 +1,12 @@
 export const workflowEnglish: Record<string, string> = {
+  'Браузер не може прочитати відеокадр цього MOV. Спробуйте оригінал у форматі MP4 з H.264.': 'The browser cannot decode this MOV frame. Try an MP4 original with H.264.',
+  'У файлі немає звукової доріжки.': 'This file has no audio track.',
+  'Браузер не підтримує звуковий кодек цього файлу. Додайте звук окремим WAV або MP3.': 'The browser does not support this audio codec. Add the audio as a separate WAV or MP3 file.',
+  'Звукова доріжка завелика для обробки в цьому браузері. Імпортуйте коротший запис або окреме аудіо.': 'The audio track is too large to process in this browser. Import a shorter recording or separate audio.',
+  'Не вдалося прочитати звукову доріжку. Додайте звук окремим WAV або MP3.': 'Could not read the audio track. Add the audio as a separate WAV or MP3 file.',
+  'Звук оригіналу не вдалося запустити. Торкніться відео та спробуйте відтворення ще раз.': 'Could not start the source audio. Tap the video and try playing again.',
+  'Експорт не міститиме звуку з цих файлів': 'The export will not include audio from these files',
+  'Ліцензії сторонніх компонентів': 'Third-party licenses',
   'Копіювати кадр': 'Copy frame',
   'Копіювати кадр оригіналу': 'Copy original frame',
   'Копіюємо…': 'Copying…',

@@ -1,10 +1,11 @@
-export type FrameCopyErrorCode = 'unsupported' | 'not-ready' | 'permission' | 'capture';
+export type FrameCopyErrorCode = 'unsupported' | 'not-ready' | 'permission' | 'capture' | 'codec';
 
 const messages: Record<FrameCopyErrorCode, string> = {
   unsupported: 'This browser cannot copy PNG images to the clipboard in this context.',
   'not-ready': 'The source frame is not ready. Wait for loading or seeking to complete.',
   permission: 'The browser did not allow writing the image to the clipboard.',
   capture: 'The original frame could not be captured as a full-resolution PNG.',
+  codec: 'This browser cannot decode the video codec in the original media file.',
 };
 
 export class FrameCopyError extends Error {

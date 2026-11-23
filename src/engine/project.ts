@@ -1,5 +1,6 @@
 import { type AudioEffects, type MediaAsset, type MediaKind, type Project, type Subtitle, type VideoEffects, type Track, defaultTracks, defaultAudio, defaultVideo, uid } from '../types';
 import { waveformPeaks } from './audio';
+import { AudioImportError, decodeImportedAudio } from './decode-audio';
 
 const STORE = 'projects';
 const PROJECT_KEY = 'current';
@@ -60,10 +61,12 @@ export async function importMedia(file: File): Promise<MediaAsset> {
       let context: AudioContext | undefined;
       try {
         context = new AudioContext();
-        asset.audioBuffer = await context.decodeAudioData(await file.arrayBuffer());
+        asset.audioBuffer = await decodeImportedAudio(file, context);
         asset.waveform = waveformPeaks(asset.audioBuffer, 160);
-      } catch {
-        // A playable video may have no audio stream, or an audio codec that Web Audio cannot decode.
+      } catch (error) {
+        asset.audioIssue = error instanceof AudioImportError
+          ? { code: error.code, codec: error.codec }
+          : { code: 'decode-failed' };
         if (kind === 'audio') throw new Error(`Браузер не може декодувати звук ${file.name}. Спробуйте WAV, MP3 або AAC.`);
       } finally { await context?.close().catch(() => undefined); }
     }

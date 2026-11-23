@@ -3,6 +3,7 @@ export interface MediaAsset {
   id: string; name: string; kind: MediaKind; url: string; duration: number;
   width?: number; height?: number; thumbnail?: string; waveform?: number[];
   audioBuffer?: AudioBuffer; file?: File; demo?: boolean;
+  audioIssue?: { code: 'no-audio' | 'unsupported-codec' | 'decode-failed' | 'too-large'; codec?: string };
 }
 export interface AudioEffects {
   gain: number; normalize: boolean; highpass: number; lowpass: number;
