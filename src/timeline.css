@@ -105,3 +105,32 @@
 @media(max-width:1100px){.cutsync-timeline .timeline-snap span{display:none}.cutsync-timeline .timeline-drag-hint{display:none!important}.cutsync-timeline .timeline-toolbar{gap:7px;padding:7px 9px}.cutsync-timeline .timeline-zoom input[type=range]{width:62px}}
 @media(max-width:700px){.cutsync-timeline{--track-header-width:150px;--track-height:60px}.cutsync-timeline .timeline-toolbar{padding:7px 8px;gap:6px}.cutsync-timeline .timeline-edit-actions{gap:2px}.cutsync-timeline .timeline-divider{margin:0 3px}.cutsync-timeline .timeline-add-button{font-size:10px;padding:0 8px}.cutsync-timeline .timeline-zoom{margin-left:auto;gap:1px}.cutsync-timeline .timeline-zoom input[type=range]{width:54px}.cutsync-timeline .timeline-zoom .tool{min-width:24px}.cutsync-timeline .timeline-fit{height:29px;font-size:10px}.cutsync-timeline .timeline-action{font-size:10px;padding:0 8px}.cutsync-timeline .track-header{padding:6px 7px}.cutsync-timeline .track-name{font-size:10px}.cutsync-timeline .timeline-footer{padding:0 8px;font-size:9px;gap:8px}.cutsync-timeline .timeline-selection{max-width:45%}.cutsync-timeline .timeline-selection>span{display:none}.cutsync-timeline .timeline-duration,.cutsync-timeline .timeline-duration strong{font-size:9px}.cutsync-timeline .timeline-empty-state{left:calc(var(--track-header-width) + 10px);right:10px;padding:12px;top:calc(var(--ruler-height) + 10px)}.cutsync-timeline .timeline-empty-icon{display:none}.cutsync-timeline .timeline-empty-state strong{font-size:11px}.cutsync-timeline .timeline-empty-state p{font-size:10px}.cutsync-timeline .timeline-empty-actions{gap:6px;margin-top:9px}.cutsync-timeline .timeline-empty-actions button{font-size:10px;min-height:29px;padding:0 8px}.cutsync-timeline .timeline-add-menu{width:236px;left:auto;right:0}.cutsync-timeline .timeline-add-menu>button{font-size:11px}}
 @media(max-width:430px){.cutsync-timeline{--track-header-width:125px}.cutsync-timeline .track-name{font-size:10px}.cutsync-timeline .track-controls{padding-left:0}.cutsync-timeline .timeline-toolbar{column-gap:6px}.cutsync-timeline .timeline-zoom{width:100%;justify-content:flex-end}.cutsync-timeline .timeline-zoom input[type=range]{width:90px}.cutsync-timeline .timeline-empty-state p{display:none}.cutsync-timeline .timeline-empty-actions button{font-size:9px}.cutsync-timeline .timeline-selection>svg{display:none}.cutsync-timeline .timeline-footer{gap:5px}.cutsync-timeline .timeline-duration{gap:3px}}
+.cutsync-timeline .track-header.video,.cutsync-timeline .timeline-lane.video{height:88px;min-height:88px}
+.cutsync-timeline .track-header.video{justify-content:space-between;padding-bottom:8px}
+.cutsync-timeline .timeline-clip.video{height:76px}
+.cutsync-timeline .timeline-clip.video .filmstrip{height:54px}
+.cutsync-timeline .timeline-clip.has-embedded-audio .filmstrip{height:30px}
+.cutsync-timeline .clip-audio-band{display:flex;align-items:center;gap:7px;position:relative;box-sizing:border-box;overflow:hidden;padding:2px 7px;color:#b6d9c4;background:#204235;border-top:1px solid #55796377;cursor:grab}
+.cutsync-timeline .clip-audio-band.embedded{height:24px;min-height:24px}
+.cutsync-timeline .clip-audio-band.standalone{height:calc(var(--track-height) - 34px);min-height:25px;border-top:0;flex-direction:row;background:transparent}
+.cutsync-timeline .clip-audio-status{position:relative;z-index:1;display:flex;gap:4px;align-items:center;min-width:0;flex:0 1 auto;max-width:100%;font-size:9px;white-space:nowrap;line-height:16px}
+.cutsync-timeline .clip-audio-status>svg{flex-shrink:0}
+.cutsync-timeline .clip-audio-status>span{overflow:hidden;text-overflow:ellipsis;min-width:0}
+.cutsync-timeline .clip-audio-band .audio-wave-bars{height:100%;min-width:20px;flex:1;display:flex;align-items:center;justify-content:space-around;gap:1px;overflow:hidden;opacity:.8}
+.cutsync-timeline .audio-wave-bars i{display:block;flex:1;min-width:1px;max-width:3px;background:#86c3a2;border-radius:1px}
+.cutsync-timeline .clip-audio-band[data-audio-state=unavailable]{background:#473a29;color:#e2bb84;border-color:#bc935c66}
+.cutsync-timeline .clip-audio-band[data-audio-state=no-audio]{background:#26303a;color:#8b99a7;border-color:#60738655}
+.cutsync-timeline .clip-audio-band.audio-is-muted{color:#9da9a0;background:#303b32}
+.cutsync-timeline .clip-audio-band.audio-is-muted .audio-wave-bars{opacity:.3}
+.cutsync-timeline .clip-audio-band[data-audio-state=unavailable].audio-is-muted{color:#cfb493;background:#3c362c}
+.cutsync-timeline .clip-audio-band.standalone .clip-audio-status{font-size:10px}
+.cutsync-timeline .timeline-audio-actions{width:100%;display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-top:8px;border-top:1px solid #404a4380}
+.cutsync-timeline .timeline-audio-context{display:flex;align-items:center;gap:7px;min-width:0;flex:1;color:#9ec6a9;font-size:10px}
+.cutsync-timeline .timeline-audio-context>svg{flex-shrink:0}
+.cutsync-timeline .timeline-audio-context>span{max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#c4d9ca}
+.cutsync-timeline .timeline-audio-context small{color:#8a9f92;font-size:9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cutsync-timeline .timeline-audio-actions .timeline-action{min-height:34px;height:auto;border-color:#566b5a;background:#26362b;color:#c0d7c4;flex-shrink:0;padding-top:5px;padding-bottom:5px}
+.cutsync-timeline .timeline-audio-actions .timeline-action:hover{background:#344737;border-color:#89a574}
+.cutsync-timeline .timeline-audio-actions .clip-audio-toggle-muted{color:#d8ba97;border-color:#79654d;background:#3a3329}
+@media(max-width:1000px){.cutsync-timeline .timeline-audio-context{flex-basis:100%}.cutsync-timeline .timeline-audio-context>span{max-width:40%}.cutsync-timeline .timeline-audio-actions{gap:7px}}
+@media(max-width:700px){.cutsync-timeline .timeline-audio-actions .timeline-action{min-height:40px;font-size:10px;padding:5px 9px}.cutsync-timeline .track-header.video,.cutsync-timeline .timeline-lane.video{height:84px;min-height:84px}.cutsync-timeline .timeline-clip.video{height:72px}.cutsync-timeline .timeline-clip.video .filmstrip{height:50px}.cutsync-timeline .timeline-clip.has-embedded-audio .filmstrip{height:26px}.cutsync-timeline .clip-audio-status{font-size:9px}.cutsync-timeline .clip-audio-band{padding-left:5px;padding-right:5px;gap:4px}.cutsync-timeline .timeline-audio-context small{font-size:9px}}

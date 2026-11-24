@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { AudioLines, Check, ChevronDown, Film, Focus, Image as ImageIcon, Link2, Pipette, Plus, RotateCcw, SlidersHorizontal, Sparkles, Trash2, Type, Upload, Volume2, WandSparkles } from 'lucide-react';
-import { defaultAudio, defaultVideo, timecode, type AudioEffects, type Clip, type MediaAsset, type Project, type Subtitle, type VideoEffects, uid } from './types';
+import { defaultAudio, defaultVideo, timecode, type AudioEffects, type Clip, type MediaAsset, type Project, type Subtitle, type VideoEffects } from './types';
 import { useI18n } from './i18n';
 import './inspector.css';
 
@@ -19,6 +19,7 @@ export interface InspectorProps {
   onAddSubtitle?: () => void;
   onBeginEdit?: () => void;
   onEndEdit?: () => void;
+  onDetachAudio?: () => void;
 }
 
 const DisclosureContext = createContext<{ sections: Record<string, boolean>; toggle: (id: string, open: boolean) => void }>({ sections: {}, toggle: () => {} });
@@ -115,7 +116,7 @@ function TextField({ label, value, multiline = false, onChange }: { label: strin
   return <label className="inspector-name"><span>{t(label)}</span>{multiline ? <textarea {...props} className="subtitle-textarea" rows={4} placeholder={t('Введіть текст…')} /> : <input {...props} />}</label>;
 }
 
-export function Inspector({ clip, asset, subtitle, project, time, onClipChange, onProjectChange, onCaptureNoise, onSync, onDelete, onImport, onAddSubtitle, onBeginEdit, onEndEdit }: InspectorProps) {
+export function Inspector({ clip, asset, subtitle, project, time, onClipChange, onProjectChange, onCaptureNoise, onSync, onDelete, onImport, onAddSubtitle, onBeginEdit, onEndEdit, onDetachAudio }: InspectorProps) {
   const { t, language } = useI18n();
   const [preferredTab, setPreferredTab] = useState<'video' | 'color' | 'audio'>('video');
   const [sections, setSections] = useState<Record<string, boolean>>({});
@@ -139,23 +140,20 @@ export function Inspector({ clip, asset, subtitle, project, time, onClipChange, 
   const changeStyle = (patch: Partial<Project['subtitleStyle']>) => onProjectChange({ ...project, subtitleStyle: { ...project.subtitleStyle, ...patch } });
   const maxSourceDuration = asset?.kind === 'image' ? 3600 : asset?.duration ?? Infinity;
   const hasAudio = Boolean(asset?.audioBuffer);
+  const confirmedNoAudio = asset?.audioIssue?.code === 'no-audio';
+  const showAudioStatus = Boolean(clip && ((asset?.kind === 'video' && !asset.demo) || audioTrack));
+  const audioStatusId = `inspector-audio-status-${clip?.id ?? 'none'}`;
+  const audioReason = hasAudio ? 'Звук готовий до монтажу.'
+    : confirmedNoAudio ? 'У файлі немає звукової доріжки.'
+      : asset?.audioIssue?.code === 'unsupported-codec' ? 'Браузер не декодує цей звуковий кодек.'
+        : asset?.audioIssue?.code === 'too-large' ? 'Звукова доріжка завелика для обробки в цьому браузері.'
+          : asset?.kind === 'image' ? 'Зображення не має звукової доріжки.'
+            : 'Звукову доріжку не вдалося декодувати.';
   const availableTracks = project.tracks.filter(track => track.kind === (audioTrack ? 'audio' : 'video'));
   const selectionKey = subtitle?.id ?? clip?.id ?? 'empty';
   const selectedName = subtitle ? subtitle.text.split('\n')[0] || t('Субтитр') : clip?.name;
   const videoDefaults = defaultVideo();
   const audioDefaults = defaultAudio();
-  const detachAudio = () => {
-    if (!clip || !asset?.audioBuffer || audioTrack) return;
-    let track = project.tracks.find(value => value.kind === 'audio');
-    if (!track) {
-      const used = new Set(project.tracks.map(value => value.id));
-      const number = Array.from({ length: 32 }, (_, index) => index + 1).find(value => !used.has(`a${value}`));
-      if (!number) return;
-      track = { id: `a${number}`, name: `${t('Аудіо')} ${number}`, kind: 'audio' };
-    }
-    const detached: Clip = { ...structuredClone(clip), id: uid(), name: `${clip.name} · ${t('Аудіо')}`, trackId: track.id, muted: false };
-    onProjectChange({ ...project, tracks: project.tracks.some(value => value.id === track.id) ? project.tracks : [...project.tracks, track], clips: [...project.clips.map(value => value.id === clip.id ? { ...value, muted: true } : value), detached] });
-  };
   const trackSelect = clip && <label className="inspector-name"><span>{t('Доріжка')}</span><select aria-label={t('Доріжка')} value={clip.trackId} onChange={event => onClipChange({ ...clip, trackId: event.target.value })}>{availableTracks.map(track => <option key={track.id} value={track.id}>{t(track.name)} ({track.id.toUpperCase()})</option>)}</select></label>;
   const placementFields = clip && <>
     <div className="number-grid placement-grid">
@@ -173,7 +171,6 @@ export function Inspector({ clip, asset, subtitle, project, time, onClipChange, 
     {!audioTrack && <TextField label="Назва кліпу" value={clip.name} onChange={name => onClipChange({ ...clip, name })} />}
     {placementFields}
     {audioTrack && <TextField label="Назва кліпу" value={clip.name} onChange={name => onClipChange({ ...clip, name })} />}
-    {!audioTrack && asset?.kind === 'video' && hasAudio && tab === 'audio' && <><button className="inspector-action" onClick={detachAudio}><AudioLines size={14} />{t('Відокремити звук')}</button><p className="inspector-hint">{t('Створює окремий аудіокліп і вимикає звук оригінального відео.')}</p></>}
   </Section>;
 
   return <DisclosureContext.Provider value={{ sections, toggle: (id, open) => setSections(current => ({ ...current, [id]: open })) }}>
@@ -195,6 +192,14 @@ export function Inspector({ clip, asset, subtitle, project, time, onClipChange, 
         <div className={`selection-icon ${subtitle ? 'subtitle-selection' : audioTrack ? 'audio-selection' : ''}`}>{subtitle ? <Type size={18} /> : audioTrack ? <AudioLines size={18} /> : asset?.kind === 'image' ? <ImageIcon size={18} /> : <Film size={18} />}</div>
         <div><span className="inspector-selection-label">{t(subtitle ? 'Вибраний субтитр' : 'Вибраний кліп')}</span><strong title={selectedName}>{selectedName}</strong><small>{subtitle ? `${timecode(subtitle.start, project.fps)} — ${timecode(subtitle.end, project.fps)}` : <>{currentTrack?.id.toUpperCase()} · {clip!.duration.toFixed(2)} {t('с')}{!audioTrack && asset?.width ? ` · ${asset.width} × ${asset.height}` : ''}</>}</small></div>
       </div>}
+      {!subtitle && clip && showAudioStatus && <section className={`inspector-video-audio ${hasAudio ? 'audio-ready' : confirmedNoAudio ? 'audio-absent' : 'audio-unavailable'}`} aria-label={t(audioTrack ? 'Звукова доріжка' : 'Звук відео')}>
+        <div className="video-audio-heading"><span><AudioLines size={14} />{t(audioTrack ? 'Звукова доріжка' : 'Звук відео')}</span><span className="video-audio-badge">{t(hasAudio ? 'Доступний' : confirmedNoAudio ? 'Немає доріжки' : 'Недоступний')}</span></div>
+        <p className="video-audio-status" id={audioStatusId}>{t(audioReason)}{asset?.audioIssue?.codec && <code>{asset.audioIssue.codec}</code>}</p>
+        <SwitchRow label={audioTrack ? 'Вимкнути звук кліпу' : 'Вимкнути звук відео'} checked={clip.muted} onChange={muted => onClipChange({ ...clip, muted })} />
+        {clip.muted && <p className="inspector-hint video-audio-muted">{t('Звук вимкнено в монтажі та експорті.')}</p>}
+        {!audioTrack && <button className="inspector-action video-audio-detach" disabled={confirmedNoAudio || !onDetachAudio} onClick={onDetachAudio}><AudioLines size={14} />{t('Відокремити звук')}</button>}
+        {!audioTrack && !confirmedNoAudio && <p className="inspector-hint video-audio-detach-hint">{t(hasAudio ? 'Окремий звуковий кліп можна обрізати або видалити.' : 'Створить окремий кліп. Декодування звуку залишиться недоступним.')}</p>}
+      </section>}
       {subtitle ? <div className="inspector-body" key={selectionKey}>
         <Section title="Текст" icon={<Type size={14} />} defaultOpen><TextField label="Текст субтитру" value={subtitle.text} multiline onChange={text => updateSubtitle({ text })} /><p className="inspector-hint edit-commit-hint">{t('Ctrl/⌘ Enter — застосувати · Esc — скасувати')}</p><div className="number-grid"><NumberField label="Початок, с" value={subtitle.start} max={subtitle.end - .04} step={1 / project.fps} onChange={start => updateSubtitle({ start })} /><NumberField label="Кінець, с" value={subtitle.end} min={subtitle.start + .04} step={1 / project.fps} onChange={end => updateSubtitle({ end })} /></div></Section>
         <Section title="Стиль субтитрів" icon={<Pipette size={14} />}><RangeField label="Розмір тексту" value={project.subtitleStyle.size} min={18} max={120} unit=" px" onChange={size => changeStyle({ size })} /><label className="field-row"><span>{t('Колір тексту')}</span><input type="color" value={project.subtitleStyle.color} onChange={event => changeStyle({ color: event.target.value })} aria-label={t('Колір субтитрів')} /></label><SwitchRow label="Темна підкладка" description="Підвищує читабельність" checked={project.subtitleStyle.background} onChange={background => changeStyle({ background })} /><p className="inspector-hint">{t('Стиль застосовується до всіх субтитрів проєкту.')}</p></Section>
@@ -237,8 +242,11 @@ export function Inspector({ clip, asset, subtitle, project, time, onClipChange, 
           </>}
           {tab === 'audio' && <>
             {placement}
+            {!hasAudio && <p className="inspector-audio-unavailable-note">{t(audioReason)}{asset?.audioIssue?.codec && <code>{asset.audioIssue.codec}</code>}<span>{t('Аудіоефекти доступні після декодування звуку. Розташування та видалення кліпу залишаються доступними.')}</span></p>}
+            <fieldset className="inspector-audio-effects" disabled={!hasAudio} aria-describedby={!hasAudio && showAudioStatus ? audioStatusId : undefined}>
+              <legend className="inspector-sr-only">{t('Аудіоефекти')}</legend>
             <Section title="Гучність" icon={<Volume2 size={14} />} defaultOpen onReset={() => onClipChange({ ...clip, muted: false, audio: { ...clip.audio, gain: 0, normalize: false } })} resetLabel="Скинути гучність" changed={clip.muted || clip.audio.gain !== 0 || clip.audio.normalize}>
-              <RangeField label="Підсилення" value={clip.audio.gain} min={-60} max={24} step={.5} unit=" dB" onChange={gain => audio({ gain })} /><SwitchRow label="Нормалізація" description="Піковий рівень −1 dBFS" checked={clip.audio.normalize} onChange={normalize => audio({ normalize })} /><SwitchRow label="Вимкнути звук кліпу" checked={clip.muted} onChange={muted => onClipChange({ ...clip, muted })} />
+              <RangeField label="Підсилення" value={clip.audio.gain} min={-60} max={24} step={.5} unit=" dB" onChange={gain => audio({ gain })} /><SwitchRow label="Нормалізація" description="Піковий рівень −1 dBFS" checked={clip.audio.normalize} onChange={normalize => audio({ normalize })} />{!showAudioStatus && <SwitchRow label="Вимкнути звук кліпу" checked={clip.muted} onChange={muted => onClipChange({ ...clip, muted })} />}
             </Section>
             <Section title="Очищення звуку" icon={<WandSparkles size={14} />} onReset={() => audio({ noiseReduction: 0, noiseProfile: undefined, compressor: false })} resetLabel="Скинути очищення" changed={clip.audio.noiseReduction > 0 || !!clip.audio.noiseProfile || clip.audio.compressor}>
               <RangeField label="Придушення шуму" value={clip.audio.noiseReduction} min={0} max={100} unit=" %" onChange={noiseReduction => audio({ noiseReduction })} /><button className="inspector-action" disabled={!hasAudio} onClick={onCaptureNoise}>{clip.audio.noiseProfile ? <Check size={14} /> : <Pipette size={14} />}{t(clip.audio.noiseProfile ? 'Оновити взірець шуму' : 'Зняти взірець шуму')}</button><p className="inspector-hint">{hasAudio ? `${t('Буде використано 0,5 с від курсора')} (${timecode(time, project.fps)}). ${t('Оберіть місце без голосу чи музики.')}` : t('Для цього джерела аудіодоріжка недоступна.')}</p>{!clip.audio.noiseProfile && <p className="inspector-hint">{t('Без взірця шум оцінюється за найтихішими ділянками.')}</p>}<SwitchRow label="Компресор" description="Вирівнює перепади гучності" checked={clip.audio.compressor} onChange={compressor => audio({ compressor })} />
@@ -248,6 +256,7 @@ export function Inspector({ clip, asset, subtitle, project, time, onClipChange, 
             </Section>
             <Section title="Синхронізація" icon={<Link2 size={14} />}><button className="inspector-action" disabled={!hasAudio} onClick={onSync}><AudioLines size={14} />{t('Синхронізувати за звуком')}</button><p className="inspector-hint">{t('Зіставляє форму звукової хвилі з опорним кліпом.')}</p></Section>
             <button className="inspector-reset" onClick={() => onClipChange({ ...clip, audio: audioDefaults })}><RotateCcw size={13} />{t('Скинути аудіоефекти')}</button>
+            </fieldset>
           </>}
           <button className="inspector-delete" onClick={onDelete}><Trash2 size={14} />{t('Видалити кліп')}</button>
           <p className="inspector-hint edit-commit-hint">{t('Enter — застосувати · Esc — скасувати')}</p>

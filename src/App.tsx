@@ -7,7 +7,7 @@ import SourcePreview from './SourcePreview';
 import Home, { Brand, LanguageSwitch } from './Home';
 import Library, { type Panel } from './Library';
 import ProjectDialog, { type ProjectOptions } from './ProjectDialog';
-import { createEmptyProject, appendAssetsToProject } from './engine/workflow';
+import { createEmptyProject, appendAssetsToProject, detachClipAudio } from './engine/workflow';
 import { TimelinePlayer, exportVideo, getExportFormats, visibleClips } from "./engine/media";
 import { canCopyOriginalFrame, encodeOriginalFrame, FrameCopyError, writeFrameToClipboard } from './engine/frame';
 import { captureAssetFrame } from './engine/original-frame';
@@ -208,6 +208,7 @@ export default function App() {
       subtitles: project.subtitles.filter(s => s.id !== selected)
     });
     setSelected(null);
+    setInspectorOpen(false);
   }
   useEffect(() => {
     if (!active || !canvas.current) return;
@@ -339,7 +340,7 @@ export default function App() {
       if (previous?.isConnected) previous.focus();
     };
   }, [modal]);
-  function addAsset(assetId: string, trackId?: string, start?: number) {
+  function addAsset(assetId: string, trackId?: string, start?: number, separateAudio = false) {
     const a = assets.find(item => item.id === assetId);
     if (!a?.url) return;
     const kind = a.kind === "audio" ? "audio" : "video";
@@ -374,13 +375,50 @@ export default function App() {
       audio: defaultAudio(),
       video: defaultVideo()
     };
-    change({
+    let next = {
       ...project,
       tracks,
       clips: [...project.clips, newClip]
-    });
-    setSelected(newClip.id);
-    notify("Кліп додано на монтажну шкалу.");
+    };
+    let selectedId = newClip.id;
+    if (separateAudio && a.kind === 'video' && target.kind === 'video') {
+      const separated = detachClipAudio(next, assets, newClip.id, { name: `${a.name} · ${t('Аудіо')}` });
+      if (!separated.audioClipId) {
+        notify('Не вдалося відокремити звук. Звільніть аудіодоріжку або додайте інший запис.', 'error');
+        return;
+      }
+      next = separated.project;
+      selectedId = separated.audioClipId || selectedId;
+    }
+    change(next);
+    setSelected(selectedId);
+    if (separateAudio) setInspectorOpen(true);
+    notify(separateAudio && selectedId !== newClip.id
+      ? a.audioBuffer ? 'Відео й звук додано окремими доріжками. Аудіокліп можна редагувати або видалити.' : 'Звук показано окремим кліпом. Для цього кодека обробка недоступна, але кліп можна видалити або замінити.'
+      : 'Кліп додано на монтажну шкалу.');
+  }
+  function detachSelectedAudio() {
+    if (!clip) return;
+    try {
+      const result = detachClipAudio(project, assets, clip.id, { name: `${clip.name} · ${t('Аудіо')}` });
+      if (!result.audioClipId) {
+        notify('Не вдалося відокремити звук. Звільніть аудіодоріжку або додайте інший запис.', 'error');
+        return;
+      }
+      if (result.project !== project) change(result.project);
+      select(result.audioClipId);
+      setInspectorOpen(true);
+      notify(asset?.audioBuffer
+        ? 'Звук на окремій доріжці. Вибраний аудіокліп можна редагувати або видалити; відео залишиться.'
+        : 'Звук показано окремим кліпом. Для цього кодека обробка недоступна, але кліп можна видалити або замінити.');
+    } catch (error) {
+      fail(error);
+    }
+  }
+  function toggleSelectedAudio() {
+    if (!clip) return;
+    change({ ...project, clips: project.clips.map(item => item.id === clip.id ? { ...item, muted: !item.muted } : item) });
+    notify(clip.muted ? 'Звук відеокліпу ввімкнено.' : 'Звук відеокліпу вимкнено в монтажі та експорті. Оригінал не змінено.');
   }
   async function handleFiles(files: FileList | File[] | null) {
     if (!files?.length) return;
@@ -820,7 +858,7 @@ export default function App() {
               icon: SlidersHorizontal,
               label: 'Образ'
             }].map(item => <button key={item.id} className={`rail-button ${panel === item.id ? 'active' : ''}`} aria-pressed={panel === item.id} onClick={() => setPanel(item.id as Panel)}><item.icon size={21} /><span>{t(item.label)}</span></button>)}</div><div className="rail-bottom"><button className="rail-button" onClick={() => setModal('help')}><CircleHelp size={20} /><span>{t('Довідка')}</span></button><button className="rail-button home-return" onClick={() => void goHome()} title={t('На стартову сторінку')}><HomeIcon size={19} /><span>{t('На старт')}</span></button></div></nav>
-    <Library onRemove={removeAsset} panel={panel} project={project} assets={assets} sourceId={sourceId} clip={clip} selected={selected} onImport={() => fileInput.current?.click()} onAdd={addAsset} onAddAll={addAll} onPreview={previewSource} onSubtitle={addSubtitle} onImportSubs={() => subInput.current?.click()} onExportSubs={() => downloadBlob(new Blob([subtitlesToSrt(project.subtitles)], {
+    <Library onRemove={removeAsset} panel={panel} project={project} assets={assets} sourceId={sourceId} clip={clip} selected={selected} onImport={() => fileInput.current?.click()} onAdd={addAsset} onAddSeparate={id => addAsset(id, undefined, undefined, true)} onAddAll={addAll} onPreview={previewSource} onSubtitle={addSubtitle} onImportSubs={() => subInput.current?.click()} onExportSubs={() => downloadBlob(new Blob([subtitlesToSrt(project.subtitles)], {
           type: 'text/plain'
         }), `${project.name}.srt`)} onSelectSubtitle={cue => {
           select(cue.id);
@@ -850,7 +888,7 @@ export default function App() {
                 display: source ? 'none' : 'block'
               }} onClick={() => void togglePlay()} />{source && <SourcePreview key={source.id} source={source} onFrameSource={setSourceFrame} onAudioError={() => notify('Звук оригіналу не вдалося запустити. Торкніться відео та спробуйте відтворення ще раз.', 'error')} />}{!source && !project.clips.length && <div className="viewer-empty"><span className="empty-viewer-icon"><Clapperboard size={32} /></span><h2>{t(assets.length ? 'Матеріали готові до монтажу' : 'Тут буде ваша історія')}</h2><p>{t(assets.length ? 'Додайте файли з медіатеки на шкалу нижче.' : 'Імпортуйте відео, звук або фото. Почніть з одного файлу.')}</p>{unplaced.length > 0 && <button className="primary-button" onClick={addAll}><Plus size={15} />{t('Додати матеріали на шкалу')}</button>}</div>}</div></div>
     {source && (!clipboardAvailable || source.audioIssue) && <div className="source-media-note" role="status">{!clipboardAvailable && <span>{t('Копіювання зображень недоступне в цьому браузері. Відкрийте CutSync через HTTPS у браузері з підтримкою буфера зображень.')}</span>}{source.audioIssue && <span>{t(audioIssueText(source))}{source.audioIssue.codec && ` (${source.audioIssue.codec})`}</span>}</div>}
-    {source ? <div className="source-transport"><div><small>{t('Перегляд оригіналу')}</small><span title={source.name}>{source.name}</span></div><button className="secondary-button" onClick={() => addAsset(source.id)}><Plus size={14} />{t('На шкалу')}</button><button className="tool" title={t('Повернутися до монтажу')} onClick={() => setSourceId(null)}><X size={17} /></button></div> : <div className="transport"><div className="time-display"><span>{timecode(time, project.fps)}<small>/ {timecode(duration, project.fps)}</small></span><label className="playhead-entry"><input aria-label={t('Позиція курсора, с')} title={t('Введіть точний час у секундах')} type="number" min="0" max={duration} step={1 / project.fps} value={timeDraft ?? Number(time.toFixed(3))} onFocus={() => setTimeDraft(String(Number(time.toFixed(3))))} onChange={e => setTimeDraft(e.target.value)} onBlur={() => {
+    {source ? <div className="source-transport"><div><small>{t('Перегляд оригіналу')}</small><span title={source.name}>{source.name}</span></div><button className="secondary-button" onClick={() => addAsset(source.id)}><Plus size={14} />{t('На шкалу')}</button>{source.kind === 'video' && !source.demo && source.audioIssue?.code !== 'no-audio' && <button className="secondary-button source-add-separate" title={t('Додати відео й звук окремо')} onClick={() => addAsset(source.id, undefined, undefined, true)}><AudioLines size={14} />{t('Додати окремо')}</button>}<button className="tool" title={t('Повернутися до монтажу')} onClick={() => setSourceId(null)}><X size={17} /></button></div> : <div className="transport"><div className="time-display"><span>{timecode(time, project.fps)}<small>/ {timecode(duration, project.fps)}</small></span><label className="playhead-entry"><input aria-label={t('Позиція курсора, с')} title={t('Введіть точний час у секундах')} type="number" min="0" max={duration} step={1 / project.fps} value={timeDraft ?? Number(time.toFixed(3))} onFocus={() => setTimeDraft(String(Number(time.toFixed(3))))} onChange={e => setTimeDraft(e.target.value)} onBlur={() => {
                   if (timeDraft !== null && timeDraft.trim() && Number.isFinite(+timeDraft)) seek(+timeDraft);
                   setTimeDraft(null);
                 }} onKeyDown={e => {
@@ -860,7 +898,7 @@ export default function App() {
     <button className="inspector-shade" aria-label={t('Закрити інспектор')} onClick={() => setInspectorOpen(false)} /><button className="inspector-mobile-close tool" title={t('Закрити інспектор')} onClick={() => setInspectorOpen(false)}><X size={19} /></button><Inspector clip={clip} asset={asset} subtitle={subtitle} project={project} time={time} onClipChange={next => change({
           ...project,
           clips: project.clips.map(c => c.id === next.id ? next : c)
-        })} onProjectChange={change} onCaptureNoise={noise} onSync={openSync} onDelete={remove} onAddSubtitle={project.clips.length ? addSubtitle : undefined} onBeginEdit={() => {
+        })} onProjectChange={change} onDetachAudio={detachSelectedAudio} onCaptureNoise={noise} onSync={openSync} onDelete={remove} onAddSubtitle={project.clips.length ? addSubtitle : undefined} onBeginEdit={() => {
           editBase.current = projectRef.current;
         }} onEndEdit={finishEdit} />
     <div className="timeline-wrap"><Timeline key={sessionGeneration.current} project={project} assets={assets} time={time} selected={selected} onSelect={select} onSeek={seek} onChange={change} onScrubStart={() => {
@@ -880,7 +918,7 @@ export default function App() {
               });
             }
             scrubWasPlaying.current = false;
-          }} onSplit={split} onDelete={remove} onUndo={undo} onRedo={redo} canUndo={!!history.length} canRedo={!!future.length} playing={playing} onDrop={addAsset} onImport={() => fileInput.current?.click()} onAddAll={addAll} hasUnplacedMedia={unplaced.length > 0} onAddSubtitle={addSubtitle} /></div></div></>}
+          }} onDetachAudio={detachSelectedAudio} onToggleClipAudio={toggleSelectedAudio} onSplit={split} onDelete={remove} onUndo={undo} onRedo={redo} canUndo={!!history.length} canRedo={!!future.length} playing={playing} onDrop={addAsset} onImport={() => fileInput.current?.click()} onAddAll={addAll} hasUnplacedMedia={unplaced.length > 0} onAddSubtitle={addSubtitle} /></div></div></>}
     {busy && <div className="busy-overlay" role="status"><div><LoaderCircle size={23} className="spin" /><strong>{t(busy)}</strong><span>{t('Обробка на вашому пристрої')}</span></div></div>}
     {toast && <div className={`toast ${toastKind}`} role={toastKind === 'error' ? 'alert' : 'status'}>{toastKind === 'error' ? <AlertCircle size={18} /> : <Check size={17} />}<span>{t(toast)}</span><button className="tool" title={t('Закрити повідомлення')} onClick={() => setToast('')}><X size={15} /></button></div>}
     {(modal === 'new' || modal === 'settings') && <ProjectDialog mode={modal} project={modal === 'new' ? createEmptyProject() : project} hasPrevious={!!recent || saveBlocked || active && !isDemoSession && (assets.length > 0 || project.clips.length > 0)} onClose={() => {

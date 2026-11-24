@@ -19,6 +19,7 @@ export interface VideoEffects {
 export interface Clip {
   id: string; assetId: string; trackId: string; name: string; start: number; in: number;
   duration: number; muted: boolean; audio: AudioEffects; video: VideoEffects;
+  detachedFromClipId?: string;
 }
 export interface Subtitle { id: string; start: number; end: number; text: string; }
 export interface Track { id: string; name: string; kind: 'video' | 'audio'; }

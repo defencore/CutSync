@@ -200,3 +200,13 @@ describe('home screen saved project metadata', () => {
     expect((await peekSavedProject())?.isDemo).toBe(false);
   });
 });
+
+
+describe('detached audio edit metadata', () => {
+  it('preserves bounded authored associations including a deleted original video', () => {
+    const p = project(); p.clips[0].trackId = 'a1'; p.clips[0].detachedFromClipId = 'deleted-original-video';
+    expect(validateProject(p, [{ id: 'a1', kind: 'video' }]).clips[0].detachedFromClipId).toBe('deleted-original-video');
+    p.clips[0].detachedFromClipId = 'x'.repeat(201);
+    expect(() => validateProject(p, [{ id: 'a1', kind: 'video' }])).toThrow();
+  });
+});

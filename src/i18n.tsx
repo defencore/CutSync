@@ -5,6 +5,23 @@ import { workflowEnglish } from './i18n-workflow';
 
 export type Language = 'uk' | 'en';
 const inspectorEnglish: Record<string, string> = {
+  "Звук відео": "Video audio",
+  "Звукова доріжка": "Audio track",
+  "Доступний": "Available",
+  "Немає доріжки": "No audio track",
+  "Недоступний": "Unavailable",
+  "Звук готовий до монтажу.": "Audio is ready for editing.",
+  "У файлі немає звукової доріжки.": "This file has no audio track.",
+  "Браузер не декодує цей звуковий кодек.": "This browser cannot decode this audio codec.",
+  "Звукова доріжка завелика для обробки в цьому браузері.": "The audio track is too large to process in this browser.",
+  "Зображення не має звукової доріжки.": "Images have no audio track.",
+  "Звукову доріжку не вдалося декодувати.": "The audio track could not be decoded.",
+  "Вимкнути звук відео": "Mute video audio",
+  "Звук вимкнено в монтажі та експорті.": "Audio is muted in the timeline and export.",
+  "Окремий звуковий кліп можна обрізати або видалити.": "The separate audio clip can be trimmed or deleted.",
+  "Створить окремий кліп. Декодування звуку залишиться недоступним.": "Creates a separate clip. Audio decoding will remain unavailable.",
+  "Аудіоефекти доступні після декодування звуку. Розташування та видалення кліпу залишаються доступними.": "Audio effects require decoded audio. You can still position or delete this clip.",
+  "Аудіоефекти": "Audio effects",
   "Розташування й обрізання": "Placement and trimming",
   "Початок звуку, с": "Audio start, s",
   "Початок на шкалі, с": "Timeline start, s",

@@ -47,3 +47,42 @@ export function appendAssetsToProject(project: Project, assets: MediaAsset[], op
   }
   return { project: { ...project, tracks, clips: [...project.clips, ...added] }, clipIds: added.map(clip => clip.id) };
 }
+
+
+export interface DetachClipAudioOptions { name?: string; }
+
+/**
+ * Creates an independent audio clip, retaining undecodable sources as editable placeholders.
+ * The authored association only prevents duplicate detaches; it never links later edits or moves.
+ */
+export function detachClipAudio(project: Project, assets: MediaAsset[], clipId: string, options: DetachClipAudioOptions = {}): { project: Project; audioClipId: string | null } {
+  const original = project.clips.find(clip => clip.id === clipId);
+  const asset = assets.find(asset => asset.id === original?.assetId);
+  if (!original || !asset || asset.kind !== 'video' || asset.demo || asset.audioIssue?.code === 'no-audio' ||
+    project.tracks.find(track => track.id === original.trackId)?.kind !== 'video') return { project, audioClipId: null };
+  const audioTracks = project.tracks.filter(track => track.kind === 'audio');
+  const audioTrackIds = new Set(audioTracks.map(track => track.id));
+  const existing = project.clips.find(clip => audioTrackIds.has(clip.trackId) && clip.detachedFromClipId === original.id &&
+    clip.assetId === original.assetId && clip.start === original.start && clip.in === original.in && clip.duration === original.duration);
+  const muteOriginal = () => project.clips.map(clip => clip.id === original.id ? { ...clip, muted: true } : clip);
+  if (existing) return { project: original.muted ? project : { ...project, clips: muteOriginal() }, audioClipId: existing.id };
+
+  const overlaps = (clip: Clip) => clip.start < original.start + original.duration && clip.start + clip.duration > original.start;
+  let track = [...audioTracks].sort((a, b) => Number(a.id.slice(1)) - Number(b.id.slice(1))).find(track =>
+    !project.mutedTracks.includes(track.id) && !project.clips.some(clip => clip.trackId === track.id && overlaps(clip)));
+  let tracks = project.tracks;
+  if (!track) {
+    const index = Array.from({ length: 32 }, (_, i) => i + 1).find(index => !project.tracks.some(track => track.id === `a${index}`));
+    if (!index) return { project, audioClipId: null };
+    track = { id: `a${index}`, name: `Звук ${index}`, kind: 'audio' };
+    tracks = [...project.tracks, track];
+  }
+  const audioClip: Clip = {
+    id: uid(), assetId: original.assetId, trackId: track.id,
+    name: (options.name?.trim() || `${original.name} · Аудіо`).slice(0, 1000),
+    start: original.start, in: original.in, duration: original.duration, muted: false,
+    audio: { ...original.audio, ...(original.audio.noiseProfile ? { noiseProfile: [...original.audio.noiseProfile] } : {}) },
+    video: defaultVideo(), detachedFromClipId: original.id,
+  };
+  return { project: { ...project, tracks, clips: [...muteOriginal(), audioClip] }, audioClipId: audioClip.id };
+}

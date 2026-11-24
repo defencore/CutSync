@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent } from 'react';
-import { Scissors, Magnet, Undo2, Redo2, Trash2, ZoomIn, ZoomOut, Film, Music2, Volume2, VolumeX, Eye, EyeOff, Captions, Maximize2, Plus, MoreHorizontal, X, Check, Upload, Layers, ChevronDown, ChevronLeft } from 'lucide-react';
+import { Scissors, Magnet, Undo2, Redo2, Trash2, ZoomIn, ZoomOut, Film, Music2, Volume2, VolumeX, Eye, EyeOff, Captions, Maximize2, Plus, MoreHorizontal, X, Check, Upload, Layers, ChevronDown, ChevronLeft, Unlink2, CircleAlert } from 'lucide-react';
 import { projectDuration, timecode, type Project, type MediaAsset, type Clip, type Track } from './types';
 import { useI18n } from './i18n';
 import './timeline.css';
@@ -11,6 +11,7 @@ interface Props {
   canUndo: boolean; canRedo: boolean; onDrop: (assetId: string, trackId: string, start: number) => void;
   onScrubStart?: () => void; onScrubEnd?: (time: number) => void;
   onImport?: () => void; onAddAll?: () => void; hasUnplacedMedia?: boolean; onAddSubtitle?: () => void;
+  onDetachAudio?: () => void; onToggleClipAudio?: () => void;
 }
 interface DragState {
   id: string; mode: string; origin: number; originY: number; dx: number; dy: number; alt: boolean; clip: Clip;
@@ -37,6 +38,9 @@ export default function Timeline(p: Props) {
   const lastTick = Math.min(Math.ceil(viewDuration / step), Math.ceil((scrollLeft + viewport) / scale / step) + 1);
   const selectedClip = p.project.clips.find(clip => clip.id === p.selected);
   const selectedSubtitle = p.project.subtitles.find(cue => cue.id === p.selected);
+  const selectedAsset = p.assets.find(asset => asset.id === selectedClip?.assetId);
+  const selectedTrack = p.project.tracks.find(track => track.id === selectedClip?.trackId);
+  const showVideoAudioControls = selectedClip && selectedAsset?.kind === 'video' && !selectedAsset.demo && selectedTrack?.kind === 'video' && selectedAsset.audioIssue?.code !== 'no-audio';
   const canSplit = Boolean(selectedClip && p.time > selectedClip.start + .04 && p.time < selectedClip.start + selectedClip.duration - .04);
   const canDelete = Boolean(selectedClip || selectedSubtitle);
   const isEmpty = !p.project.clips.length && !p.project.subtitles.length;
@@ -63,6 +67,27 @@ export default function Timeline(p: Props) {
     });
     return () => cancelAnimationFrame(frame);
   }, [isEmpty, viewDuration]);
+  useEffect(() => {
+    const viewportElement = scroll.current;
+    if (!p.selected || !viewportElement || !grid.current) return;
+    const target = Array.from(grid.current.querySelectorAll<HTMLElement>('[data-clip-id]')).find(element => element.dataset.clipId === p.selected);
+    if (!target) return;
+    const visible = viewportElement.getBoundingClientRect(), box = target.getBoundingClientRect();
+    let moved = false;
+    // Reveal explicit selections without moving a clip that is already visible in the viewport.
+    if (box.right < visible.left + 15 || box.left > visible.right - 15) {
+      viewportElement.scrollLeft = Math.max(0, viewportElement.scrollLeft + box.left - visible.left - 12);
+      moved = true;
+    }
+    if (box.top < visible.top + 36) {
+      viewportElement.scrollTop += box.top - visible.top - 36;
+      moved = true;
+    } else if (box.bottom > visible.bottom - 16) {
+      viewportElement.scrollTop += box.bottom - visible.bottom + 16;
+      moved = true;
+    }
+    if (moved) manualScrollUntil.current = performance.now() + 3000;
+  }, [p.selected]);
   useEffect(() => {
     const element = scroll.current;
     if (!p.playing || !element || drag || scrubbing.current || performance.now() < manualScrollUntil.current) return;
@@ -189,6 +214,32 @@ export default function Timeline(p: Props) {
     });
   }
 
+  function audioStatus(asset: MediaAsset | undefined, clip: Clip, trackMuted: boolean, embedded: boolean) {
+    const noAudio = asset?.audioIssue?.code === 'no-audio';
+    const available = Boolean(asset?.audioBuffer);
+    const muted = !noAudio && (clip.muted || trackMuted);
+    const state = noAudio ? 'no-audio' : !available ? 'unavailable' : muted ? 'muted' : 'available';
+    const prefix = embedded ? t('Звук відео') : asset?.kind === 'video' ? t('Аудіо з відео') : t('Аудіозапис');
+    const issue = asset?.audioIssue?.code;
+    const detail = noAudio ? t('У відео немає аудіодоріжки') : available ? t('Аудіо доступне для монтажу') :
+      issue === 'unsupported-codec' ? t('Аудіокодек не підтримується') :
+      issue === 'decode-failed' ? t('Не вдалося декодувати аудіо') :
+      issue === 'too-large' ? t('Аудіо завелике для обробки') : t('Аудіо ще недоступне для обробки');
+    const codec = asset?.audioIssue?.codec;
+    const muteLabel = trackMuted ? t('Звук доріжки вимкнено') : t('Звук вимкнено');
+    const label = noAudio ? t('Без аудіодоріжки') : !available ?
+      `${muted ? `${muteLabel} · ` : ''}${t('Аудіо недоступне')}${codec ? ` (${codec})` : ''}` : muted ? muteLabel : prefix;
+    const title = `${asset?.name ?? clip.name} · ${prefix} · ${detail}${codec ? ` · ${t('Кодек')}: ${codec}` : ''}${muted ? ` · ${muteLabel}` : ''}`;
+    return { state, label, title, muted, hasWaveform: !noAudio && Boolean(asset?.waveform?.length) };
+  }
+  function audioStrip(asset: MediaAsset | undefined, clip: Clip, trackMuted: boolean, embedded: boolean) {
+    const status = audioStatus(asset, clip, trackMuted, embedded);
+    return <div className={`clip-audio-band ${embedded ? 'embedded' : 'standalone'} ${status.muted ? 'audio-is-muted' : ''}`} data-audio-state={status.state} data-embedded-audio={embedded || undefined} title={status.title} aria-label={status.title} role="img">
+      <span className="clip-audio-status">{status.state === 'unavailable' ? <CircleAlert size={11} /> : status.muted || status.state === 'no-audio' ? <VolumeX size={11} /> : <Volume2 size={11} />}<span>{status.label}</span></span>
+      {status.hasWaveform && <div className="audio-wave-bars" data-waveform="stored" aria-hidden="true">{waveform(asset, clip)}</div>}
+    </div>;
+  }
+
   const edited = editingTrack ? p.project.tracks.find(track => track.id === editingTrack.id) : undefined;
   const editedClipCount = edited ? p.project.clips.filter(clip => clip.trackId === edited.id).length : 0;
   const dragPreview = drag ? resolveDrag(drag, drag.dx / scale) : null;
@@ -219,6 +270,11 @@ export default function Timeline(p: Props) {
         <output className="timeline-zoom-value">{zoomPercent.toFixed(zoomPercent < 10 ? 1 : 0)}%</output>
         <button className="timeline-fit" title={t('Показати весь монтаж на шкалі')} onClick={() => changeZoom(fitScale, true)}><Maximize2 size={14} /><span>{t('Вмістити')}</span></button>
       </div>
+      {showVideoAudioControls && (p.onDetachAudio || p.onToggleClipAudio) && <div className="timeline-audio-actions" role="group" aria-label={t('Звук вибраного відео')}>
+        <span className="timeline-audio-context" title={audioStatus(selectedAsset, selectedClip, p.project.mutedTracks.includes(selectedClip.trackId), true).title}><Volume2 size={13} /><span>{selectedClip.name}</span><small>{audioStatus(selectedAsset, selectedClip, p.project.mutedTracks.includes(selectedClip.trackId), true).label}</small></span>
+        {p.onToggleClipAudio && <button className={`timeline-action ${selectedClip.muted ? 'clip-audio-toggle-muted' : ''}`} aria-pressed={selectedClip.muted} onClick={p.onToggleClipAudio} title={t(selectedClip.muted ? 'Увімкнути звук відео' : 'Вимкнути звук відео')}>{selectedClip.muted ? <VolumeX size={15} /> : <Volume2 size={15} />}<span>{t(selectedClip.muted ? 'Увімкнути звук відео' : 'Вимкнути звук відео')}</span></button>}
+        {p.onDetachAudio && <button className="timeline-action detach-audio-action" onClick={p.onDetachAudio} title={t('Створити окремий аудіокліп для обрізання, редагування або видалення')}><Unlink2 size={15} /><span>{t('Відокремити звук')}</span></button>}
+      </div>}
     </div>
     <div className="timeline-content">
       <div className="track-headers" ref={headers} onWheel={event => { if (scroll.current) scroll.current.scrollTop += event.deltaY; }}>
@@ -244,16 +300,18 @@ export default function Timeline(p: Props) {
               const visibleStart = Math.max(0, preview.start), visibleDuration = Math.max(0, preview.start + preview.duration - visibleStart);
               if (!visibleDuration && !state) return null;
               const waveClip = { ...preview, in: preview.in + Math.max(0, -preview.start), duration: visibleDuration };
-              return <div key={clip.id} className={`timeline-clip ${track.kind} ${p.selected === clip.id ? 'selected' : ''} ${clip.muted ? 'is-muted' : ''} ${!asset?.url ? 'missing' : ''} ${!visibleDuration ? 'outside-zero' : ''}`} style={{ left: visibleStart * scale, width: !visibleDuration ? 115 : Math.max(5, visibleDuration * scale), transform: state?.mode === 'move' ? `translateY(${state.dy}px)` : undefined, zIndex: state ? 11 : undefined }} tabIndex={0} role="button" title={`${clip.name} · ${t('Початок')}: ${signedTime(clip.start)} · ${t('Тривалість')}: ${clip.duration.toFixed(2)} ${t('с')}`} aria-label={`${clip.name}, ${signedTime(clip.start)}`} aria-pressed={p.selected === clip.id} onFocus={() => p.onSelect(clip.id)} onPointerDown={event => { if (event.button !== 0) return; event.stopPropagation(); p.onSelect(clip.id); setDrag({ id: clip.id, mode: (event.target as HTMLElement).dataset.handle ?? 'move', origin: event.clientX, originY: event.clientY, dx: 0, dy: 0, alt: event.altKey, clip }); event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={event => { if (drag?.id === clip.id) setDrag({ ...drag, dx: event.clientX - drag.origin, dy: event.clientY - drag.originY, alt: event.altKey }); }} onPointerUp={endDrag} onPointerCancel={() => setDrag(null)} onLostPointerCapture={() => setDrag(null)}>
+              const embeddedAudio = track.kind === 'video' && asset?.kind === 'video' && !asset.demo;
+              const sound = embeddedAudio || track.kind === 'audio' ? audioStatus(asset, clip, p.project.mutedTracks.includes(track.id), embeddedAudio) : undefined;
+              return <div key={clip.id} data-clip-id={clip.id} className={`timeline-clip ${track.kind} ${p.selected === clip.id ? 'selected' : ''} ${clip.muted && track.kind === 'audio' ? 'is-muted' : ''} ${embeddedAudio ? 'has-embedded-audio' : ''} ${!asset?.url ? 'missing' : ''} ${!visibleDuration ? 'outside-zero' : ''}`} style={{ left: visibleStart * scale, width: !visibleDuration ? 115 : Math.max(5, visibleDuration * scale), transform: state?.mode === 'move' ? `translateY(${state.dy}px)` : undefined, zIndex: state ? 11 : undefined }} tabIndex={0} role="button" title={`${clip.name} · ${t('Початок')}: ${signedTime(clip.start)} · ${t('Тривалість')}: ${clip.duration.toFixed(2)} ${t('с')}`} aria-label={`${clip.name}, ${signedTime(clip.start)}${sound ? ` · ${sound.title}` : ''}`} aria-pressed={p.selected === clip.id} onFocus={() => p.onSelect(clip.id)} onPointerDown={event => { if (event.button !== 0) return; event.stopPropagation(); p.onSelect(clip.id); setDrag({ id: clip.id, mode: (event.target as HTMLElement).dataset.handle ?? 'move', origin: event.clientX, originY: event.clientY, dx: 0, dy: 0, alt: event.altKey, clip }); event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={event => { if (drag?.id === clip.id) setDrag({ ...drag, dx: event.clientX - drag.origin, dy: event.clientY - drag.originY, alt: event.altKey }); }} onPointerUp={endDrag} onPointerCancel={() => setDrag(null)} onLostPointerCapture={() => setDrag(null)}>
                 {preview.start >= 0 && <div className="trim-handle left" data-handle="left" title={t('Перетягніть, щоб обрізати початок')} />}
                 <div className="clip-label">{preview.start < 0 ? <ChevronLeft size={12} /> : track.kind === 'video' ? <Film size={12} /> : <Music2 size={12} />}<span>{!visibleDuration ? t('Поза шкалою') : clip.name}</span>{clip.muted && <VolumeX size={11} />}</div>
-                {track.kind === 'video' ? <div className="filmstrip" style={{ backgroundImage: asset?.thumbnail ? `url("${asset.thumbnail}")` : 'none' }} /> : <div className="clip-waveform" title={t(asset?.waveform?.length ? 'Звукова хвиля джерела' : 'Звукова хвиля недоступна')}>{waveform(asset, waveClip)}</div>}
+                {track.kind === 'video' ? <><div className="filmstrip" style={{ backgroundImage: asset?.thumbnail ? `url("${asset.thumbnail}")` : 'none' }} />{embeddedAudio && audioStrip(asset, waveClip, p.project.mutedTracks.includes(track.id), true)}</> : audioStrip(asset, waveClip, p.project.mutedTracks.includes(track.id), false)}
                 <div className="trim-handle right" data-handle="right" title={t('Перетягніть, щоб обрізати кінець')} />
               </div>;
             })}
             {!isEmpty && !p.project.clips.some(clip => clip.trackId === track.id) && <span className="empty-lane">{t(track.kind === 'video' ? 'Перетягніть сюди відео або фото' : 'Перетягніть сюди аудіозапис')}</span>}
           </div>)}
-          <div className="timeline-lane subtitle" onPointerDown={event => { if (event.target === event.currentTarget) startScrub(event); }} onPointerMove={moveScrub} onPointerUp={endScrub} onPointerCancel={endScrub} onLostPointerCapture={endScrub}>{p.project.subtitles.map(cue => <button key={cue.id} className={`subtitle-clip ${p.selected === cue.id ? 'selected' : ''}`} style={{ left: cue.start * scale, width: Math.max(5, (cue.end - cue.start) * scale) }} title={cue.text} onClick={() => { p.onSelect(cue.id); p.onSeek(cue.start); }}><Captions size={13} /><span>{cue.text}</span></button>)}{!isEmpty && !p.project.subtitles.length && p.onAddSubtitle && <button className="subtitle-empty-action" onClick={p.onAddSubtitle}><Plus size={12} />{t('Додати субтитр')}</button>}</div>
+          <div className="timeline-lane subtitle" onPointerDown={event => { if (event.target === event.currentTarget) startScrub(event); }} onPointerMove={moveScrub} onPointerUp={endScrub} onPointerCancel={endScrub} onLostPointerCapture={endScrub}>{p.project.subtitles.map(cue => <button key={cue.id} data-clip-id={cue.id} className={`subtitle-clip ${p.selected === cue.id ? 'selected' : ''}`} style={{ left: cue.start * scale, width: Math.max(5, (cue.end - cue.start) * scale) }} title={cue.text} onClick={() => { p.onSelect(cue.id); p.onSeek(cue.start); }}><Captions size={13} /><span>{cue.text}</span></button>)}{!isEmpty && !p.project.subtitles.length && p.onAddSubtitle && <button className="subtitle-empty-action" onClick={p.onAddSubtitle}><Plus size={12} />{t('Додати субтитр')}</button>}</div>
           {dragPreview?.snapAt !== undefined && <div className="timeline-snap-line" style={{ left: dragPreview.snapAt * scale }} />}
           {duration > 0 && <div className="timeline-end-marker" style={{ left: duration * scale }} />}
           <div className="playhead" title={t('Перетягніть курсор для перегляду')} aria-label={t('Курсор відтворення')} role="slider" aria-valuemin={0} aria-valuemax={duration} aria-valuenow={Math.min(duration, p.time)} tabIndex={0} style={{ left: p.time * scale }} {...scrubHandlers}><div className="playhead-line" /><div className="playhead-cap" /></div>
